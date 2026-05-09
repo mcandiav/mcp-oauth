@@ -391,7 +391,7 @@ function registerTools(server) {
 
 function createMcpServer() {
   const server = new McpServer({
-    name: "chatgpt-docs-mcp",
+    name: "docs-mcp",
     version: "1.0.0"
   });
   registerTools(server);
@@ -401,7 +401,7 @@ function createMcpServer() {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "chatgpt-docs-mcp",
+    service: "docs-mcp",
     host: HOST,
     port: PORT,
     workspaceRoot: WORKSPACE_ROOT,
@@ -552,6 +552,7 @@ app.delete("/mcp", async (req, res) => {
 });
 
 app.listen(PORT, HOST, () => {
-  console.log(`chatgpt-docs-mcp listening on http://${HOST}:${PORT}`);
+  console.log(`docs-mcp listening on http://${HOST}:${PORT}`);
   console.log(`MCP endpoint available at http://${HOST}:${PORT}/mcp`);
 });
+

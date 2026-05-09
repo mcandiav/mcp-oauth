@@ -1,5 +1,5 @@
 {
-  "name": "chatgpt-docs-mcp",
+  "name": "docs-mcp",
   "version": "1.0.0",
   "description": "MCP de documentacion para ChatGPT",
   "type": "module",
@@ -13,3 +13,4 @@
     "zod": "^3.25.76"
   }
 }
+
