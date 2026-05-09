@@ -18,6 +18,7 @@ const HOST = process.env.MCP_HOST ?? "0.0.0.0";
 const WORKSPACE_ROOT = path.resolve(process.env.MCP_WORKSPACE_ROOT ?? process.cwd());
 const MAX_INLINE_BYTES = Number(process.env.MCP_MAX_INLINE_BYTES ?? 1_000_000);
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN?.trim() || "";
+const NORMALIZED_AUTH_TOKEN = normalizeToken(MCP_AUTH_TOKEN);
 
 function normalizeRelativePath(relativePath, { allowWorkspaceRoot = false } = {}) {
   if (typeof relativePath !== "string") {
@@ -411,28 +412,41 @@ app.get("/health", (_req, res) => {
   });
 });
 
+function normalizeToken(value) {
+  if (!value || typeof value !== "string") return "";
+  const trimmed = value.trim();
+  const match = trimmed.match(/^Bearer\s+(.+)$/i);
+  return (match ? match[1] : trimmed).trim();
+}
+
 function getBearerToken(req) {
   const auth = req.headers.authorization;
-  if (!auth || typeof auth !== "string") return null;
-  const [scheme, token] = auth.split(" ");
-  if (!scheme || !token) return null;
-  if (scheme.toLowerCase() !== "bearer") return null;
-  return token;
+  if (typeof auth === "string" && auth.trim()) {
+    const match = auth.trim().match(/^Bearer\s+(.+)$/i);
+    if (match?.[1]) return normalizeToken(match[1]);
+    // Fallback: accept raw token in Authorization for compatibility.
+    return normalizeToken(auth);
+  }
+
+  const apiKey = req.headers["x-api-key"];
+  if (typeof apiKey === "string" && apiKey.trim()) return normalizeToken(apiKey);
+
+  return null;
 }
 
 function requireAuth(req, res) {
-  if (!MCP_AUTH_TOKEN) return true;
+  if (!NORMALIZED_AUTH_TOKEN) return true;
 
   const token = getBearerToken(req);
   if (!token) {
     res.status(401).json({
       error: "Unauthorized",
-      message: "Missing Bearer token"
+      message: "Missing auth token"
     });
     return false;
   }
 
-  if (token !== MCP_AUTH_TOKEN) {
+  if (token !== NORMALIZED_AUTH_TOKEN) {
     res.status(403).json({
       error: "Forbidden",
       message: "Invalid Bearer token"
