@@ -1,0 +1,11 @@
+﻿services:
+  chatgpt-docs-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatgpt-docs-mcp
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - "D:/MCP/workspace:/workspace"
+    restart: unless-stopped

@@ -1,0 +1,15 @@
+{
+  "name": "chatgpt-docs-mcp",
+  "version": "1.0.0",
+  "description": "MCP de documentacion para ChatGPT",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "express": "^5.1.0",
+    "zod": "^3.25.76"
+  }
+}
