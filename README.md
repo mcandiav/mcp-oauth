@@ -12,7 +12,9 @@ Este proyecto corresponde a la versión activa del servidor MCP documental dentr
 | V1.1 | 2026-05-09 | Se registra la decisión de consolidar este proyecto como versión activa y mantener `obsoleto/doc-mcp` solo como referencia histórica. | Evitar mantener dos implementaciones activas del mismo servidor MCP documental. | La trazabilidad queda separada entre versión activa y versión obsoleta. | Decisiones vigentes / Trazabilidad |
 | V1.2 | 2026-05-09 | Se documentan mejoras pendientes detectadas para compatibilidad con agentes IA y operación multisesión. | Alinear la implementación con el comportamiento esperado por ChatGPT y otros clientes MCP. | Quedan explícitos los criterios que el programador debe validar o implementar. | Mejoras pendientes |
 | V1.3 | 2026-05-09 | Se registra como decisión futura publicar el proyecto en GitHub y desplegarlo desde repositorio en Docker Desktop y EasyPanel. | Definir el destino operativo del proyecto fuera del workspace MCPacer. | El proyecto deberá quedar preparado como repositorio autónomo, reproducible y desplegable. | Despliegue / Preparación para GitHub |
-| V1.4 | 2026-05-09 | Se actualiza `server.mjs` para soportar multisesión básica por `mcp-session-id`, compatibilidad de raíz en navegación, variables `PORT/MCP_PORT/MCP_HOST` y autenticación Bearer opcional con `MCP_AUTH_TOKEN`. | Cerrar brechas funcionales críticas detectadas en la revisión técnica. | El servidor queda más compatible con clientes MCP y más seguro para exposición controlada. | Estado actual / Variables / Seguridad |
+| V1.4 | 2026-05-09 | Se documenta soporte esperado de variables `PORT/MCP_PORT/MCP_HOST`, autenticación Bearer opcional con `MCP_AUTH_TOKEN` y compatibilidad de raíz en navegación. | Cerrar brechas funcionales críticas detectadas en la revisión técnica. | El servidor queda mejor especificado para clientes MCP y exposición controlada. | Estado actual / Variables / Seguridad |
+| V1.5 | 2026-05-09 | Se registra el error real de multisesión `Already connected to a transport` y la corrección obligatoria que debe aplicar programación antes de subir a GitHub. | El endpoint `/health` respondía, pero `/mcp` fallaba al reutilizar una instancia global de `McpServer` con múltiples transports. | La versión de GitHub debe corregirse para crear un `McpServer` por sesión o request antes de considerarse oficial. | Multisesión / Publicación GitHub / Validación |
+| V1.6 | 2026-05-09 | Se agrega la decisión de incluir un archivo de variables por defecto seguro para despliegue local y EasyPanel. | Facilitar instalación desde GitHub sin obligar a inventar parámetros ni versionar secretos reales. | Programación debe agregar `.env.example` o `.env.default` con valores seguros y mantener `.env` fuera de Git. | Variables / GitHub / Docker Desktop / EasyPanel |
 
 ## 1. Objetivo funcional
 
@@ -71,9 +73,9 @@ Si se decide cambiar el nombre final a `mcp-doc`, debe actualizarse de forma con
 
 La base técnica oficial debe ser la implementación que incorpore la corrección de manejo multisesión del conector.
 
-Al momento de crear este README, el archivo `docs-mcp/server.mjs` visible en el workspace debe ser revisado por el programador para confirmar que contiene esa corrección. Si no la contiene, debe actualizarse tomando como referencia la versión que ya resolvía múltiples sesiones o múltiples login del conector.
+El archivo `docs-mcp/server.mjs` debe ser corregido por programación para asegurar que no reutiliza una instancia global de `McpServer` con más de un transporte.
 
-No se debe publicar una versión oficial que vuelva al problema de sesiones simultáneas.
+No se debe publicar una versión oficial en GitHub que vuelva al problema de sesiones simultáneas.
 
 ### 3.4 Una sola versión activa
 
@@ -97,6 +99,46 @@ El repositorio debe permitir:
 - montar un volumen externo como workspace documental en `/workspace`;
 - definir variables de entorno sin guardar secretos en Git;
 - mantener una sola versión oficial del servidor MCP documental.
+
+### 3.6 Corrección obligatoria antes de llevar a GitHub
+
+Antes de subir o actualizar la versión oficial en GitHub, programación debe corregir el error de multisesión detectado durante la prueba local.
+
+Error observado al probar `POST /mcp` con `initialize`:
+
+```text
+Already connected to a transport. Call close() before connecting to a new transport, or use a separate Protocol instance per connection.
+```
+
+Conclusión técnica:
+
+- `/health` funcionaba correctamente;
+- el túnel público respondía correctamente;
+- la autenticación ya no bloqueaba;
+- el fallo estaba en `/mcp`;
+- la causa era reutilizar una instancia global de `McpServer` y ejecutar `server.connect(transport)` más de una vez con distintos transports.
+
+La versión de GitHub debe contener la corrección indicada en la sección 9 antes de considerarse lista para despliegue.
+
+### 3.7 Archivo de entorno por defecto
+
+Programación debe agregar al repositorio un archivo de entorno por defecto seguro para facilitar despliegue desde GitHub.
+
+La decisión recomendada es versionar un archivo:
+
+```text
+.env.example
+```
+
+o, si se quiere un nombre más explícito para Docker/EasyPanel:
+
+```text
+.env.default
+```
+
+No se debe versionar un `.env` real con secretos. El archivo `.env` local debe quedar excluido por `.gitignore`.
+
+El archivo por defecto debe servir como plantilla para Docker Desktop y EasyPanel, con valores no sensibles y con `MCP_AUTH_TOKEN` comentado para que no se publique un secreto falso ni real.
 
 ## 4. Tools MCP consideradas
 
@@ -123,6 +165,8 @@ El servidor debe mantener estas restricciones:
 4. Las operaciones destructivas deben estar claramente identificadas por la tool.
 5. Si se expone fuera de una red privada, debe usarse autenticación Bearer mediante `MCP_AUTH_TOKEN` o una protección equivalente en el reverse proxy.
 6. Los secretos, tokens, llaves privadas y certificados no deben versionarse.
+7. El archivo `.env` local debe estar en `.gitignore`.
+8. El repositorio solo debe incluir `.env.example` o `.env.default` sin secretos reales.
 
 ## 6. Variables de entorno esperadas
 
@@ -136,10 +180,35 @@ El servidor debe mantener estas restricciones:
 | `MCP_HTTP_JSON_LIMIT` | Límite del body JSON recibido por Express. |
 | `MCP_AUTH_TOKEN` | Token Bearer requerido para proteger `/mcp`, si se habilita. |
 
-Estado actual en implementación:
+Criterio esperado:
 
-- soportadas: `PORT`, `MCP_PORT`, `MCP_HOST`, `MCP_WORKSPACE_ROOT`, `MCP_MAX_INLINE_BYTES`, `MCP_HTTP_JSON_LIMIT`, `MCP_AUTH_TOKEN`;
-- comportamiento: `MCP_AUTH_TOKEN` habilita autenticación Bearer obligatoria en `/mcp` cuando está definido.
+- `MCP_AUTH_TOKEN` definido con valor debe exigir `Authorization: Bearer <token>` en `/mcp`;
+- `MCP_AUTH_TOKEN` omitido, comentado o vacío no debe exigir token;
+- los cambios de `.env` requieren recrear el contenedor, no solo `docker compose restart`.
+
+### 6.1 Plantilla de entorno por defecto
+
+Programación debe agregar una plantilla de entorno al repositorio.
+
+Contenido recomendado para `.env.example` o `.env.default`:
+
+```env
+PORT=8787
+MCP_PORT=8787
+MCP_HOST=0.0.0.0
+MCP_WORKSPACE_ROOT=/workspace
+MCP_MAX_INLINE_BYTES=1000000
+MCP_HTTP_JSON_LIMIT=25mb
+# MCP_AUTH_TOKEN=change-me-only-if-exposing-publicly
+```
+
+Reglas:
+
+1. `MCP_AUTH_TOKEN` debe quedar comentado por defecto.
+2. Para exposición pública, el operador debe definir un token real fuera del repositorio.
+3. El `.env` real local no debe subirse a GitHub.
+4. Docker Desktop puede usar una copia local de esta plantilla como `.env`.
+5. EasyPanel debe configurar estas variables desde su panel de variables o secretos, no desde un `.env` con secretos versionado.
 
 ## 7. Despliegue
 
@@ -169,7 +238,8 @@ docs-mcp/
 ├── server.mjs
 ├── .dockerignore
 ├── .gitignore
-└── .env.example
+├── .env.example
+└── .env.default (opcional si se usa además de .env.example)
 ```
 
 Archivos ya considerados en el proyecto activo:
@@ -183,25 +253,35 @@ docs-mcp/server.mjs
 docs-mcp/README.md
 ```
 
-Archivos recomendados antes de publicar en GitHub:
+Archivos requeridos antes de publicar en GitHub:
 
 ```text
 docs-mcp/.gitignore
 docs-mcp/.env.example
 ```
 
+Archivo opcional:
+
+```text
+docs-mcp/.env.default
+```
+
 Antes de subir el proyecto a GitHub y usarlo como fuente de despliegue, se debe validar:
 
-1. que `server.mjs` tenga la corrección multisesión;
+1. que `server.mjs` tenga la corrección multisesión descrita en la sección 9;
 2. que `list_files` acepte raíz como `.`, `./`, omitida y cadena vacía;
 3. que `Dockerfile` construya correctamente;
 4. que `docker-compose.yml` monte el workspace externo en `/workspace`;
 5. que no existan secretos versionados dentro del proyecto;
 6. que `package.json` use el nombre oficial final;
 7. que EasyPanel pueda construir desde GitHub usando el `Dockerfile`;
-8. que Docker Desktop pueda levantar el servicio localmente usando Docker Compose.
+8. que Docker Desktop pueda levantar el servicio localmente usando Docker Compose;
+9. que `POST /mcp` con `initialize` no devuelva `Already connected to a transport`;
+10. que ChatGPT pueda listar archivos mediante el conector MCP;
+11. que exista `.gitignore` excluyendo `.env`;
+12. que exista `.env.example` o `.env.default` con valores seguros por defecto.
 
-## 8. Compatibilidad de raíz para agentes IA (implementada)
+## 8. Compatibilidad de raíz para agentes IA
 
 El servidor debe aceptar como raíz del workspace cualquiera de las siguientes variantes al usar `list_files` o herramientas equivalentes de navegación:
 
@@ -216,21 +296,121 @@ Todas esas variantes deben resolverse internamente como la raíz configurada en 
 
 El objetivo es evitar que ChatGPT, Claude, Cursor, Codex u otros agentes fallen al listar el workspace cuando usan distintos defaults para representar el directorio raíz.
 
-Esta compatibilidad ya está aplicada en la implementación activa para tools de navegación por directorio, sin relajar seguridad: rutas absolutas, rutas fuera del workspace e intentos de traversal siguen siendo rechazados.
+Esta compatibilidad no debe relajar la seguridad: rutas absolutas, rutas fuera del workspace e intentos de traversal deben seguir siendo rechazados.
 
-## 9. Multisesión del conector (implementada en versión actual)
+## 9. Corrección obligatoria: multisesión y transporte MCP
 
-La versión oficial debe conservar o incorporar la corrección de manejo multisesión.
+La versión oficial debe corregir el manejo multisesión del endpoint `/mcp`.
 
-Criterio esperado:
+### 9.1 Error detectado
 
-- permitir sesiones MCP simultáneas cuando el cliente las requiera;
-- no romper conexiones por múltiples login o múltiples instancias del conector;
-- manejar correctamente `mcp-session-id` cuando aplique;
-- evitar estado global compartido que cause conflictos entre clientes;
-- cerrar sesiones de forma ordenada cuando el transporte lo indique.
+Durante la prueba local, el servicio respondía correctamente a:
 
-Esta corrección ya está integrada con manejo de sesión por encabezado `mcp-session-id`, soporte de cierre de sesión por `DELETE /mcp` y aislamiento básico por sesión.
+```text
+GET /health
+```
+
+pero fallaba al probar:
+
+```text
+POST /mcp
+method: initialize
+```
+
+con el error:
+
+```text
+Already connected to a transport. Call close() before connecting to a new transport, or use a separate Protocol instance per connection.
+```
+
+### 9.2 Causa
+
+La causa es una arquitectura incorrecta en `server.mjs`:
+
+```js
+const server = new McpServer(...)
+```
+
+creado como instancia global, y luego reutilizado con:
+
+```js
+await server.connect(transport)
+```
+
+para más de un transporte.
+
+El SDK MCP no permite reconectar la misma instancia de `McpServer` a distintos transports. Cada sesión o request stateless debe usar su propia instancia de servidor/protocolo.
+
+### 9.3 Corrección requerida
+
+Programación debe refactorizar `server.mjs` con este criterio:
+
+1. Mover el registro de tools a una función `registerTools(server)`.
+2. Crear una función `createMcpServer()` que instancie un nuevo `McpServer` y registre las tools.
+3. No mantener un `McpServer` global conectado.
+4. Mantener un mapa de sesiones con objetos `{ server, transport }`, no solo `transport`.
+5. Para requests con `mcp-session-id`, reutilizar el par `{ server, transport }` de esa sesión.
+6. Para `initialize` sin sesión, crear un nuevo contexto de sesión.
+7. Para requests stateless sin sesión, crear un `McpServer` nuevo y cerrar el transporte al terminar.
+8. En `DELETE /mcp`, cerrar el transporte y eliminar la sesión del mapa.
+
+Estructura esperada:
+
+```js
+function registerTools(server) {
+  server.registerTool(...);
+  // resto de tools
+}
+
+function createMcpServer() {
+  const server = new McpServer({
+    name: "chatgpt-docs-mcp",
+    version: "1.0.0"
+  });
+
+  registerTools(server);
+  return server;
+}
+
+const sessions = new Map();
+
+function createSessionContext() {
+  let transport;
+  const server = createMcpServer();
+
+  transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableJsonResponse: true,
+    onsessioninitialized: (sessionId) => {
+      sessions.set(sessionId, { server, transport });
+    }
+  });
+
+  return { server, transport };
+}
+
+function createStatelessContext() {
+  const server = createMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true
+  });
+
+  return { server, transport };
+}
+```
+
+### 9.4 Validación obligatoria
+
+Después de corregir `server.mjs`, programación debe validar:
+
+1. reconstruir y recrear el contenedor;
+2. confirmar que `GET /health` responde `ok: true`;
+3. confirmar que `POST /mcp` con `initialize` no devuelve `Already connected to a transport`;
+4. confirmar que el conector ChatGPT puede ejecutar `list_files`;
+5. confirmar que al listar un workspace vacío devuelve `{ files: [] }` y no error 502;
+6. confirmar que al agregar archivos al volumen `/workspace`, `list_files` los muestra;
+7. confirmar que el comportamiento se mantiene detrás de Cloudflare Tunnel y no solo en `localhost`.
 
 ## 10. Esquema de salida recomendado
 
@@ -261,19 +441,28 @@ Este criterio facilita que los clientes MCP y agentes IA interpreten la salida s
 | `Dockerfile` | Imagen del servicio. |
 | `docker-compose.yml` | Ejecución local o en host Docker. |
 | `.dockerignore` | Exclusiones de build Docker. |
-| `.gitignore` | Exclusiones para el futuro repositorio GitHub. |
+| `.gitignore` | Debe excluir `.env`, `node_modules`, logs y artefactos temporales. |
 | `.env.example` | Plantilla de variables sin secretos reales. |
+| `.env.default` | Plantilla opcional equivalente a `.env.example` si se prefiere ese nombre. |
+| `.env` | Archivo local real. No debe versionarse. |
 | `obsoleto/doc-mcp/README.md` | Referencia histórica de la versión anterior. |
 
 ## 12. Estado actual
 
-Estado documental: creado y alineado con la convención del README raíz de MCPacer.
+Estado documental: actualizado con el error real detectado en `/mcp`, la corrección que debe aplicar programación y la obligación de agregar una plantilla de entorno por defecto.
 
-Estado funcional: actualización aplicada en código (`server.mjs`) y documentada en este README.
+Estado funcional esperado antes de llevar a GitHub: pendiente de que programación incorpore la corrección multisesión en `server.mjs`, agregue `.gitignore`, agregue `.env.example` o `.env.default`, reconstruya la imagen y valide el conector.
 
 Puntos que deben revisarse antes de considerar cerrada la consolidación:
 
-1. Confirmar que `package.json` y el nombre del servidor MCP reflejan el nombre oficial final.
-2. Confirmar que `obsoleto/doc-mcp` queda solo como trazabilidad histórica.
-3. Preparar `.gitignore` y `.env.example` antes de publicar en GitHub.
-4. Validar despliegue desde GitHub en Docker Desktop y EasyPanel.
+1. Confirmar que `server.mjs` crea un `McpServer` nuevo por sesión o request.
+2. Confirmar que ya no existe una instancia global conectada a múltiples transports.
+3. Confirmar que `POST /mcp` con `initialize` no devuelve `Already connected to a transport`.
+4. Confirmar que ChatGPT puede ejecutar `list_files` sin error 502.
+5. Confirmar que `package.json` y el nombre del servidor MCP reflejan el nombre oficial final.
+6. Confirmar que `obsoleto/doc-mcp` queda solo como trazabilidad histórica.
+7. Preparar `.gitignore` antes de publicar en GitHub.
+8. Agregar `.env.example` o `.env.default` con valores seguros por defecto.
+9. Confirmar que `.env` queda excluido de Git.
+10. Validar despliegue desde GitHub en Docker Desktop y EasyPanel.
+11. Subir la corrección a GitHub solo después de validar localmente y por túnel.
