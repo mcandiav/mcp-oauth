@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -15,10 +16,19 @@ app.use(express.json({ limit: process.env.MCP_HTTP_JSON_LIMIT ?? "25mb" }));
 
 const PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 8787);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
+const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.trim() || `http://localhost:${PORT}/mcp`;
 const WORKSPACE_ROOT = path.resolve(process.env.MCP_WORKSPACE_ROOT ?? process.cwd());
 const MAX_INLINE_BYTES = Number(process.env.MCP_MAX_INLINE_BYTES ?? 1_000_000);
-const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN?.trim() || "";
-const NORMALIZED_AUTH_TOKEN = normalizeToken(MCP_AUTH_TOKEN);
+const AUTH_MODE = (process.env.MCP_AUTH_MODE ?? "none").trim().toLowerCase();
+const MCP_API_KEY = process.env.MCP_API_KEY?.trim() || process.env.MCP_AUTH_TOKEN?.trim() || "";
+const NORMALIZED_API_KEY = normalizeToken(MCP_API_KEY);
+const OAUTH_ISSUER = process.env.OAUTH_ISSUER?.trim() || "";
+const OAUTH_AUDIENCE = process.env.OAUTH_AUDIENCE?.trim() || "";
+const OAUTH_JWKS_URL = process.env.OAUTH_JWKS_URL?.trim() || "";
+const OAUTH_REQUIRED_SCOPES = (process.env.OAUTH_REQUIRED_SCOPES ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 function normalizeRelativePath(relativePath, { allowWorkspaceRoot = false } = {}) {
   if (typeof relativePath !== "string") {
@@ -405,9 +415,10 @@ app.get("/health", (_req, res) => {
     service: "docs-mcp",
     host: HOST,
     port: PORT,
+    authMode: AUTH_MODE,
     workspaceRoot: WORKSPACE_ROOT,
     maxInlineBytes: MAX_INLINE_BYTES,
-    authEnabled: Boolean(MCP_AUTH_TOKEN),
+    authEnabled: AUTH_MODE !== "none",
     time: new Date().toISOString()
   });
 });
@@ -424,33 +435,88 @@ function getBearerToken(req) {
   if (typeof auth === "string" && auth.trim()) {
     const match = auth.trim().match(/^Bearer\s+(.+)$/i);
     if (match?.[1]) return normalizeToken(match[1]);
-    // Fallback: accept raw token in Authorization for compatibility.
-    return normalizeToken(auth);
   }
-
-  const apiKey = req.headers["x-api-key"];
-  if (typeof apiKey === "string" && apiKey.trim()) return normalizeToken(apiKey);
-
   return null;
 }
 
-function requireAuth(req, res) {
-  if (!NORMALIZED_AUTH_TOKEN) return true;
+function resourceMetadataUrl() {
+  return MCP_PUBLIC_URL.endsWith("/mcp")
+    ? `${MCP_PUBLIC_URL.slice(0, -4)}/.well-known/oauth-protected-resource`
+    : `${MCP_PUBLIC_URL}/.well-known/oauth-protected-resource`;
+}
+
+function unauthorized(res, message = "unauthorized") {
+  if (AUTH_MODE === "oauth") {
+    res.set("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl()}"`);
+  }
+  res.status(401).json({
+    error: "Unauthorized",
+    message
+  });
+}
+
+function ensureAuthConfig() {
+  if (!["none", "api_key", "oauth"].includes(AUTH_MODE)) {
+    throw new Error("MCP_AUTH_MODE invalido. Usa: none, api_key u oauth.");
+  }
+  if (AUTH_MODE === "api_key" && !NORMALIZED_API_KEY) {
+    throw new Error("MCP_AUTH_MODE=api_key requiere MCP_API_KEY (o alias MCP_AUTH_TOKEN).");
+  }
+  if (AUTH_MODE === "oauth") {
+    if (!MCP_PUBLIC_URL || !OAUTH_ISSUER || !OAUTH_AUDIENCE || !OAUTH_JWKS_URL) {
+      throw new Error("MCP_AUTH_MODE=oauth requiere MCP_PUBLIC_URL, OAUTH_ISSUER, OAUTH_AUDIENCE y OAUTH_JWKS_URL.");
+    }
+  }
+}
+
+let oauthJwks = null;
+function getOauthJwks() {
+  if (!oauthJwks) {
+    oauthJwks = createRemoteJWKSet(new URL(OAUTH_JWKS_URL));
+  }
+  return oauthJwks;
+}
+
+function hasRequiredScopes(payloadScopes, requiredScopes) {
+  if (!requiredScopes.length) return true;
+  const set = new Set(
+    String(payloadScopes ?? "")
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  return requiredScopes.every((scope) => set.has(scope));
+}
+
+async function requireAuth(req, res) {
+  if (AUTH_MODE === "none") return true;
 
   const token = getBearerToken(req);
   if (!token) {
-    res.status(401).json({
-      error: "Unauthorized",
-      message: "Missing auth token"
-    });
+    unauthorized(res, "Missing Bearer token");
     return false;
   }
 
-  if (token !== NORMALIZED_AUTH_TOKEN) {
-    res.status(403).json({
-      error: "Forbidden",
-      message: "Invalid Bearer token"
+  if (AUTH_MODE === "api_key") {
+    if (token !== NORMALIZED_API_KEY) {
+      unauthorized(res, "Invalid API key");
+      return false;
+    }
+    return true;
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, getOauthJwks(), {
+      issuer: OAUTH_ISSUER,
+      audience: OAUTH_AUDIENCE
     });
+
+    if (!hasRequiredScopes(payload.scope, OAUTH_REQUIRED_SCOPES)) {
+      unauthorized(res, "Insufficient scope");
+      return false;
+    }
+  } catch {
+    unauthorized(res, "Invalid or expired OAuth token");
     return false;
   }
 
@@ -493,7 +559,7 @@ async function closeContext(context) {
 }
 
 async function handleMcpRequest(req, res, requestBody) {
-  if (!requireAuth(req, res)) return;
+  if (!(await requireAuth(req, res))) return;
 
   const headerSessionId = getHeaderSessionId(req);
   const hasHeaderSession = Boolean(headerSessionId);
@@ -543,7 +609,7 @@ app.get("/mcp", async (req, res) => {
 });
 
 app.delete("/mcp", async (req, res) => {
-  if (!requireAuth(req, res)) return;
+  if (!(await requireAuth(req, res))) return;
 
   const sessionId = getHeaderSessionId(req);
   const context = sessionId ? sessions.get(sessionId) : null;
@@ -564,6 +630,26 @@ app.delete("/mcp", async (req, res) => {
     await closeContext(context);
   }
 });
+
+app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+  if (AUTH_MODE !== "oauth") {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  res.json({
+    resource: MCP_PUBLIC_URL,
+    authorization_servers: [OAUTH_ISSUER],
+    scopes_supported: OAUTH_REQUIRED_SCOPES,
+    bearer_methods_supported: ["header"]
+  });
+});
+
+try {
+  ensureAuthConfig();
+} catch (error) {
+  console.error("Invalid auth configuration:", error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
 
 app.listen(PORT, HOST, () => {
   console.log(`docs-mcp listening on http://${HOST}:${PORT}`);
