@@ -115,6 +115,9 @@ function registerTools(server) {
         recursive: z.boolean().optional().default(true),
         include_hidden: z.boolean().optional().default(true),
         max_results: z.number().int().min(1).max(50_000).optional().default(20_000)
+      },
+      outputSchema: {
+        files: z.array(z.string())
       }
     },
     async ({ relative_dir, recursive, include_hidden, max_results }) => {
@@ -157,6 +160,12 @@ function registerTools(server) {
         relative_path: z.string().min(1),
         encoding: z.enum(["auto", "utf8", "base64"]).optional().default("auto"),
         max_bytes: z.number().int().min(1).max(10_000_000).optional().default(MAX_INLINE_BYTES)
+      },
+      outputSchema: {
+        relative_path: z.string(),
+        encoding: z.enum(["utf8", "base64"]),
+        bytes: z.number(),
+        content: z.string()
       }
     },
     async ({ relative_path, encoding, max_bytes }) => {
@@ -200,6 +209,11 @@ function registerTools(server) {
         content: z.string(),
         encoding: z.enum(["utf8", "base64"]).optional().default("utf8"),
         create_dirs: z.boolean().optional().default(true)
+      },
+      outputSchema: {
+        relative_path: z.string(),
+        encoding: z.enum(["utf8", "base64"]),
+        bytes_written: z.number()
       }
     },
     async ({ relative_path, content, encoding, create_dirs }) => {
@@ -234,6 +248,11 @@ function registerTools(server) {
       inputSchema: {
         relative_path: z.string().min(1),
         recursive: z.boolean().optional().default(false)
+      },
+      outputSchema: {
+        relative_path: z.string(),
+        deleted: z.boolean(),
+        reason: z.string().optional()
       }
     },
     async ({ relative_path, recursive }) => {
@@ -270,6 +289,10 @@ function registerTools(server) {
       inputSchema: {
         relative_dir: z.string().min(1),
         recursive: z.boolean().optional().default(true)
+      },
+      outputSchema: {
+        relative_dir: z.string(),
+        created: z.boolean()
       }
     },
     async ({ relative_dir, recursive }) => {
@@ -289,6 +312,13 @@ function registerTools(server) {
       description: "Devuelve metadata de un archivo/carpeta dentro del workspace permitido.",
       inputSchema: {
         relative_path: z.string().min(1)
+      },
+      outputSchema: {
+        relative_path: z.string(),
+        is_file: z.boolean(),
+        is_dir: z.boolean(),
+        size: z.number(),
+        mtime: z.string()
       }
     },
     async ({ relative_path }) => {
@@ -319,6 +349,15 @@ function registerTools(server) {
         match: z.enum(["name", "name_or_content"]).optional().default("name"),
         case_sensitive: z.boolean().optional().default(false),
         max_results: z.number().int().min(1).max(10_000).optional().default(200)
+      },
+      outputSchema: {
+        query: z.string(),
+        results: z.array(
+          z.object({
+            relative_path: z.string(),
+            preview: z.string().optional()
+          })
+        )
       }
     },
     async ({ query, relative_dir, match, case_sensitive, max_results }) => {
@@ -372,7 +411,11 @@ function registerTools(server) {
     {
       title: "Estado Git",
       description: "Muestra el estado Git del workspace de prueba.",
-      inputSchema: {}
+      inputSchema: {},
+      outputSchema: {
+        branch: z.string(),
+        status: z.string()
+      }
     },
     async () => {
       const { stdout: shortStatus } = await execFileAsync("git", ["status", "--short"], {
