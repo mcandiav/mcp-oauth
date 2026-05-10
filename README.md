@@ -1,277 +1,260 @@
-# docs-mcp
+# docs-mcp / mcp-sidy
 
 Servidor MCP HTTP para exponer operaciones controladas de filesystem sobre un workspace documental montado en contenedor.
 
-Este `README.md` es el **instructivo técnico de implementación del proyecto `docs-mcp`**. Debe ser usado por programación para construir, configurar, desplegar y validar este servidor MCP.
+Este `README.md` es la **fuente de verdad técnica oficial** del proyecto `docs-mcp` / `mcp-sidy`. Define cómo debe quedar implementado, configurado, desplegado y validado el servidor MCP para funcionar con Docker/EasyPanel, Cloudflare Access Managed OAuth y ChatGPT.
 
-El `README.md` ubicado en la raíz del workspace MCPacer cumple otra función: es el **índice general del workspace/proyectos**. No reemplaza este instructivo del proyecto.
+El objetivo de este documento es eliminar ambigüedades: si el código no cumple lo descrito aquí, el programa está incompleto.
 
-## Bitácora de cambios
-
-| Versión | Fecha | Cambio realizado | Motivo | Impacto | Sección afectada |
-|---|---|---|---|---|---|
-| V1.0 | 2026-05-09 | Se crea `README.md` oficial del proyecto `docs-mcp`. | Cumplir la convención documental del README raíz de MCPacer. | El proyecto queda identificado como servidor MCP documental activo. | Documento completo |
-| V1.1 | 2026-05-09 | Se registra la decisión de consolidar este proyecto como versión activa y mantener `obsoleto/doc-mcp` solo como referencia histórica. | Evitar mantener dos implementaciones activas del mismo servidor MCP documental. | La trazabilidad queda separada entre versión activa y versión obsoleta. | Decisiones vigentes / Trazabilidad |
-| V1.2 | 2026-05-09 | Se documentan mejoras necesarias para compatibilidad con agentes IA y operación multisesión. | Alinear la implementación con el comportamiento esperado por ChatGPT y otros clientes MCP. | Quedan explícitos los criterios que el programador debe validar o implementar. | Compatibilidad / Multisesión |
-| V1.3 | 2026-05-09 | Se registra como decisión publicar el proyecto en GitHub y desplegarlo desde repositorio en Docker Desktop y EasyPanel. | Definir el destino operativo del proyecto fuera del workspace MCPacer. | El proyecto debe quedar preparado como repositorio autónomo, reproducible y desplegable. | Despliegue / GitHub |
-| V1.4 | 2026-05-09 | Se documenta soporte esperado de variables `PORT/MCP_PORT/MCP_HOST`, autenticación Bearer opcional con `MCP_AUTH_TOKEN` y compatibilidad de raíz en navegación. | Cerrar brechas funcionales detectadas en revisión técnica. | El servidor queda mejor especificado para clientes MCP y exposición controlada. | Variables / Seguridad |
-| V1.5 | 2026-05-09 | Se registra el error real de multisesión `Already connected to a transport` y la corrección obligatoria que debe aplicar programación antes de subir a GitHub. | `/health` respondía, pero `/mcp` fallaba al reutilizar una instancia global de `McpServer` con múltiples transports. | La versión de GitHub debe corregirse para crear un `McpServer` por sesión o request antes de considerarse oficial. | Multisesión / Validación |
-| V1.6 | 2026-05-09 | Se agrega la decisión de incluir un archivo de variables por defecto seguro para despliegue local y EasyPanel. | Facilitar instalación desde GitHub sin inventar parámetros ni versionar secretos reales. | Programación debe agregar `.env.example` o `.env.default` y mantener `.env` fuera de Git. | Variables / GitHub |
-| V1.7 | 2026-05-09 | Se documenta configuración oficial esperada para `docker-compose.yml` y `.env`, parametrizando puertos y volumen desde variables. | El compose probado no inyectaba `.env` al contenedor y dejaba `workspaceRoot` en `/app`; además no debía hardcodear `ports` ni `volumes`. | Programación debe corregir `docker-compose.yml`, `.env.example` y validación de despliegue para que Docker Desktop y EasyPanel funcionen de forma reproducible. | Docker Compose / `.env` / Despliegue |
-| V1.8 | 2026-05-09 | Se elimina el hardcode de `/workspace` en el destino del volumen y se agrega `MCP_WORKSPACE_CONTAINER_PATH`. | Permitir que el operador cambie el nombre/ruta interna del workspace si lo necesita. | `docker-compose.yml` debe parametrizar tanto la ruta host como la ruta interna del contenedor, y `MCP_WORKSPACE_ROOT` debe coincidir con esa ruta interna. | Docker Compose / Volumen / `.env` |
-| V1.9 | 2026-05-09 | Se define autenticación configurable por `.env` con modos `oauth`, `api_key` y `none`. | Permitir instalar el mismo MCP en cuentas ChatGPT Plus con OAuth y en cuentas Empresa con token/API key, sin mantener dos códigos distintos. | Programación debe implementar middleware de autenticación por modo, metadata OAuth cuando corresponda y plantilla `.env.example` actualizada. | Seguridad / Autenticación / `.env` |
+---
 
 ## 1. Objetivo funcional
 
 `docs-mcp` expone un servidor MCP por HTTP para operar sobre archivos de documentación dentro de un workspace controlado.
 
-El servidor está pensado para listar, leer, buscar, crear, reemplazar, borrar y consultar metadata de archivos dentro del workspace permitido. El caso de uso principal es exponer documentación interna a ChatGPT mediante MCP, manteniendo el acceso limitado al directorio configurado.
+Permite a ChatGPT ejecutar tools MCP para:
 
-## 2. Alcance de este README
+- listar archivos;
+- leer archivos;
+- buscar archivos;
+- crear archivos;
+- reemplazar archivos;
+- borrar archivos;
+- crear carpetas;
+- consultar metadata;
+- revisar estado Git del workspace.
 
-Este archivo es el instructivo operativo y técnico del proyecto `docs-mcp`.
-
-Debe indicar al programador:
-
-1. cómo debe quedar implementado el servidor;
-2. qué variables debe leer desde `.env`;
-3. cómo debe resolver autenticación;
-4. cómo debe proteger el workspace;
-5. cómo debe empaquetarse en Docker;
-6. cómo debe validarse en ChatGPT, Docker Desktop y EasyPanel.
-
-El `README.md` de la raíz del workspace MCPacer debe mantenerse como índice general de proyectos y no como manual de implementación de este servidor.
-
-## 3. Stack y plataforma principal
-
-| Elemento | Definición |
-|---|---|
-| Runtime | Node.js |
-| Framework HTTP | Express |
-| Protocolo | Model Context Protocol vía Streamable HTTP |
-| SDK MCP | `@modelcontextprotocol/sdk` |
-| Validación de entradas | `zod` |
-| Empaquetado | Docker |
-| Orquestación local | Docker Compose |
-| Plataforma prevista | EasyPanel o cualquier host Docker compatible |
-| Endpoint MCP | `/mcp` |
-| Endpoint de salud | `/health` |
-| Endpoint OAuth Protected Resource Metadata | `/.well-known/oauth-protected-resource` cuando `MCP_AUTH_MODE=oauth` |
-
-## 4. Decisiones vigentes
-
-### 4.1 Proyecto activo
-
-`docs-mcp` es el proyecto activo para el servidor MCP documental dentro de MCPacer. La versión anterior ubicada en `obsoleto/doc-mcp` debe conservarse solo como trazabilidad histórica y referencia técnica.
-
-### 4.2 Una sola versión activa
-
-No deben coexistir dos servidores MCP documentales activos con el mismo propósito.
-
-Regla vigente:
-
-- activo: `docs-mcp/`;
-- histórico u obsoleto: `obsoleto/doc-mcp/`.
-
-### 4.3 Una sola base de código para autenticación
-
-No deben existir ramas o copias separadas del servidor para OAuth, token o sin autenticación.
-
-La autenticación debe definirse exclusivamente por variables de entorno:
-
-```env
-MCP_AUTH_MODE=oauth
-# o
-MCP_AUTH_MODE=api_key
-# o
-MCP_AUTH_MODE=none
-```
-
-## 5. Tools MCP consideradas
-
-| Tool | Propósito | Tipo de operación |
-|---|---|---|
-| `list_files` | Lista archivos dentro del workspace permitido. | Lectura |
-| `read_file` | Lee el contenido de un archivo. | Lectura |
-| `write_file` | Crea o reemplaza un archivo. | Escritura |
-| `delete_path` | Borra un archivo o carpeta. | Destructiva |
-| `make_dir` | Crea un directorio. | Escritura |
-| `stat_path` | Devuelve metadata de archivo o carpeta. | Lectura |
-| `search_files` | Busca archivos por nombre o contenido. | Lectura |
-| `git_status` | Muestra estado Git del workspace. | Lectura |
-
-## 6. Seguridad y restricciones
-
-1. Todas las rutas deben resolverse dentro del workspace configurado.
-2. No se deben permitir rutas absolutas.
-3. No se debe permitir traversal fuera del workspace.
-4. Las operaciones destructivas deben estar claramente identificadas por la tool.
-5. Los secretos, tokens, llaves privadas y certificados no deben versionarse.
-6. El archivo `.env` local debe estar en `.gitignore`.
-7. El repositorio solo debe incluir `.env.example` o `.env.default` sin secretos reales.
-8. Los tokens no deben aceptarse por query string.
-9. Toda autenticación debe recibirse por header HTTP `Authorization`.
-10. Si el servicio queda expuesto públicamente, no debe usarse `MCP_AUTH_MODE=none`.
-
-## 7. Autenticación configurable por `.env`
-
-### 7.1 Modos soportados
-
-| Modo | Variable | Uso | Selección en ChatGPT |
-|---|---|---|---|
-| OAuth | `MCP_AUTH_MODE=oauth` | Clientes ChatGPT Plus o instalaciones que no muestran token manual. | `OAuth` |
-| API key / token | `MCP_AUTH_MODE=api_key` | Cuentas Empresa/Business donde ChatGPT muestra `Token de acceso / clave de API`. | `Token de acceso / clave de API` |
-| Sin autenticación | `MCP_AUTH_MODE=none` | Pruebas locales o entornos cerrados. No usar expuesto a Internet. | `Sin autenticación` |
-
-### 7.2 Regla principal
-
-La opción elegida en ChatGPT debe coincidir con `MCP_AUTH_MODE`.
-
-Ejemplos:
+El endpoint MCP principal es:
 
 ```text
-ChatGPT Plus con OAuth -> MCP_AUTH_MODE=oauth
-ChatGPT Empresa con Token/API key -> MCP_AUTH_MODE=api_key
-Prueba local cerrada -> MCP_AUTH_MODE=none
+/mcp
 ```
 
-### 7.3 Modo `api_key`
-
-Cuando `MCP_AUTH_MODE=api_key`, el servidor debe exigir:
-
-```http
-Authorization: Bearer <MCP_API_KEY>
-```
-
-Variables requeridas:
-
-```env
-MCP_AUTH_MODE=api_key
-MCP_API_KEY=change-me-with-a-long-random-secret
-```
-
-Criterios de implementación:
-
-1. Si falta `Authorization`, responder `401`.
-2. Si el header no empieza con `Bearer `, responder `401`.
-3. Si el token no coincide con `MCP_API_KEY`, responder `401`.
-4. Si `MCP_API_KEY` está vacío, no permitir arrancar en modo `api_key`.
-5. No aceptar token por query string.
-6. No registrar el token completo en logs.
-
-### 7.4 Modo `oauth`
-
-Cuando `MCP_AUTH_MODE=oauth`, el servidor MCP debe actuar como resource server y validar:
-
-```http
-Authorization: Bearer <access_token>
-```
-
-Variables mínimas requeridas:
-
-```env
-MCP_AUTH_MODE=oauth
-MCP_PUBLIC_URL=https://mcp.cliente.com/mcp
-OAUTH_ISSUER=https://auth.cliente.com
-OAUTH_AUDIENCE=https://mcp.cliente.com/mcp
-OAUTH_JWKS_URL=https://auth.cliente.com/.well-known/jwks.json
-OAUTH_REQUIRED_SCOPES=mcp:read,mcp:write
-```
-
-Criterios de implementación:
-
-1. Validar firma del JWT contra JWKS.
-2. Validar `issuer` contra `OAUTH_ISSUER`.
-3. Validar `audience` o `resource` contra `OAUTH_AUDIENCE`.
-4. Validar expiración.
-5. Validar scopes requeridos.
-6. Responder `401` si falta token, está vencido, tiene firma inválida o no tiene permisos.
-7. Publicar metadata de recurso protegido en `/.well-known/oauth-protected-resource`.
-8. No implementar OAuth casero si puede usarse un proveedor como Keycloak, Auth0, Clerk, WorkOS, Entra ID u otro Authorization Server compatible.
-
-### 7.5 Metadata OAuth requerida
-
-Cuando `MCP_AUTH_MODE=oauth`, el servidor debe exponer:
+Ejemplo público para la app nueva:
 
 ```text
-GET /.well-known/oauth-protected-resource
+https://docs.at-once.cl/mcp
 ```
 
-Respuesta esperada:
+Ejemplo público usado en la validación anterior:
+
+```text
+https://mcp-sidy.somosgeex.cl/mcp
+```
+
+---
+
+## 2. Arquitectura esperada
+
+Flujo esperado:
+
+```text
+ChatGPT
+  -> OAuth / Dynamic Client Registration (DCR)
+  -> Cloudflare Access Managed OAuth
+  -> Cloudflare Access Application
+  -> Cloudflare Tunnel / proxy / EasyPanel
+  -> contenedor docs-mcp
+  -> endpoint /mcp
+```
+
+En despliegue Docker o EasyPanel:
+
+```text
+Cloudflare -> https://docs.at-once.cl/mcp
+  -> origin / servicio Docker
+  -> docs-mcp escuchando en 0.0.0.0:8787
+```
+
+---
+
+## 3. Decisión arquitectónica obligatoria para Cloudflare Access
+
+Cuando `docs-mcp` funciona detrás de **Cloudflare Access Managed OAuth**, el servidor MCP debe aceptar el JWT OAuth desde dos posibles headers HTTP:
+
+```http
+Authorization: Bearer <jwt>
+```
+
+y también:
+
+```http
+Cf-Access-Jwt-Assertion: <jwt>
+```
+
+Esto es **obligatorio**.
+
+No es opcional.  
+No es una mejora futura.  
+No es una interpretación del programador.  
+No basta con documentarlo.  
+Debe estar implementado en `server.mjs`.
+
+---
+
+## 4. Motivo técnico del requisito `Cf-Access-Jwt-Assertion`
+
+Cloudflare Access puede autenticar correctamente al usuario y autorizar la aplicación, pero el JWT validable que llega al origin puede venir en:
+
+```http
+Cf-Access-Jwt-Assertion: <jwt>
+```
+
+y no necesariamente en:
+
+```http
+Authorization: Bearer <jwt>
+```
+
+Si `server.mjs` solo lee `Authorization`, el flujo puede pasar por Cloudflare correctamente, mostrar la pantalla:
+
+```text
+Authorize Client -> ChatGPT -> Allow
+```
+
+pero después el MCP puede responder:
 
 ```json
-{
-  "resource": "https://mcp.cliente.com/mcp",
-  "authorization_servers": [
-    "https://auth.cliente.com"
-  ],
-  "scopes_supported": [
-    "mcp:read",
-    "mcp:write"
-  ],
-  "bearer_methods_supported": [
-    "header"
-  ]
+{"error":"Unauthorized","message":"Missing Bearer token"}
+```
+
+Por lo tanto, el servidor debe extraer token desde ambos headers.
+
+---
+
+## 5. Implementación obligatoria en `server.mjs`
+
+La función `getBearerToken(req)` debe quedar exactamente con esta lógica:
+
+```js
+function getBearerToken(req) {
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.trim()) {
+    const match = auth.trim().match(/^Bearer\s+(.+)$/i);
+    if (match?.[1]) return normalizeToken(match[1]);
+  }
+
+  const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
+  if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
+    return normalizeToken(cfAccessJwt);
+  }
+
+  return null;
 }
 ```
 
-Si falta token en modo OAuth, el servidor debe responder `401` e indicar la metadata del recurso:
+Esta función debe estar implementada en el archivo real:
 
-```http
-WWW-Authenticate: Bearer resource_metadata="https://mcp.cliente.com/.well-known/oauth-protected-resource"
+```text
+server.mjs
 ```
 
-### 7.6 Modo `none`
+---
 
-Cuando `MCP_AUTH_MODE=none`, el servidor no debe exigir autenticación.
+## 6. Código incorrecto que debe rechazarse
 
-Uso permitido:
+Este código es **incorrecto** para Cloudflare Access Managed OAuth:
 
-1. prueba local;
-2. red privada;
-3. túnel temporal controlado;
-4. workspace sin información sensible.
+```js
+function getBearerToken(req) {
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.trim()) {
+    const match = auth.trim().match(/^Bearer\s+(.+)$/i);
+    if (match?.[1]) return normalizeToken(match[1]);
+  }
+  return null;
+}
+```
 
-Uso prohibido:
+Ese código solo acepta:
 
-1. exposición pública permanente;
-2. datos de clientes;
-3. producción;
-4. workspace con secretos, certificados, tokens, backups o datos personales.
+```http
+Authorization: Bearer <jwt>
+```
 
-## 8. Variables de entorno esperadas
+y no acepta:
 
-| Variable | Uso esperado |
-|---|---|
-| `MCP_CONTAINER_NAME` | Nombre del contenedor creado por Docker Compose. |
-| `MCP_BIND_ADDRESS` | IP del host donde Docker publicará el puerto. En local se recomienda `127.0.0.1`. |
-| `MCP_HOST_PORT` | Puerto expuesto en el host Windows/Linux/macOS. |
-| `MCP_CONTAINER_PORT` | Puerto interno expuesto por el contenedor. |
-| `PORT` | Puerto HTTP usado por la app Node. |
-| `MCP_PORT` | Alternativa para definir el puerto HTTP usado por la app Node. |
-| `MCP_HOST` | Host de escucha dentro del contenedor, normalmente `0.0.0.0`. |
-| `MCP_PUBLIC_URL` | URL pública completa del endpoint MCP, ejemplo `https://mcp.cliente.com/mcp`. |
-| `MCP_WORKSPACE_HOST_PATH` | Ruta real del host que Docker monta como volumen. Ejemplo Windows: `D:/MCP/workspace`. |
-| `MCP_WORKSPACE_CONTAINER_PATH` | Ruta interna del contenedor donde Docker monta el workspace. Ejemplo: `/workspace`, `/docs`, `/data/docs`. |
-| `MCP_WORKSPACE_ROOT` | Ruta interna que lee la app Node. Debe coincidir con `MCP_WORKSPACE_CONTAINER_PATH`. |
-| `MCP_MAX_INLINE_BYTES` | Tamaño máximo para devolver archivos inline. |
-| `MCP_HTTP_JSON_LIMIT` | Límite del body JSON recibido por Express. |
-| `MCP_AUTH_MODE` | Modo de autenticación: `oauth`, `api_key` o `none`. |
-| `MCP_API_KEY` | Token estático requerido cuando `MCP_AUTH_MODE=api_key`. |
-| `OAUTH_ISSUER` | Issuer esperado del Authorization Server cuando `MCP_AUTH_MODE=oauth`. |
-| `OAUTH_AUDIENCE` | Audience/resource esperado para el access token OAuth. |
-| `OAUTH_JWKS_URL` | URL JWKS para validar firma JWT. |
-| `OAUTH_REQUIRED_SCOPES` | Lista separada por comas de scopes requeridos. |
+```http
+Cf-Access-Jwt-Assertion: <jwt>
+```
 
-Variables obsoletas o transitorias:
+Por lo tanto, no cumple la arquitectura requerida para Cloudflare Access.
 
-| Variable | Estado |
-|---|---|
-| `MCP_AUTH_TOKEN` | Debe migrarse a `MCP_API_KEY` + `MCP_AUTH_MODE=api_key`. Puede mantenerse temporalmente como alias retrocompatible, pero no debe ser la variable principal nueva. |
+---
 
-## 9. `.env.example` requerido
+## 7. Validación obligatoria del código
 
-El repositorio debe incluir una plantilla versionable sin secretos reales.
+Antes de entregar el programa, programación debe ejecutar:
+
+```powershell
+cd D:\mcp\docs-mcp; Select-String -Path server.mjs -Pattern "cf-access-jwt-assertion|getBearerToken" -Context 0,12
+```
+
+Debe aparecer este bloque:
+
+```js
+const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
+if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
+  return normalizeToken(cfAccessJwt);
+}
+```
+
+Si ese bloque no aparece, el programa no está corregido.
+
+---
+
+## 8. Validación JWT OAuth
+
+Después de obtener el token desde `Authorization` o desde `Cf-Access-Jwt-Assertion`, el servidor debe validar el JWT con JWKS remoto.
+
+La validación esperada es:
+
+```js
+jwtVerify(token, getOauthJwks(), {
+  issuer: OAUTH_ISSUER,
+  audience: OAUTH_AUDIENCE
+});
+```
+
+Debe validar:
+
+1. firma contra JWKS;
+2. issuer;
+3. audience;
+4. expiración;
+5. scopes, solo si `OAUTH_REQUIRED_SCOPES` tiene valores.
+
+Si `OAUTH_REQUIRED_SCOPES` está vacío, no debe bloquear por scopes.
+
+---
+
+## 9. Variables `.env` requeridas para OAuth
+
+Para un ambiente real con Cloudflare Access, el `.env` debe incluir:
+
+```env
+MCP_AUTH_MODE=oauth
+MCP_PUBLIC_URL=https://docs.at-once.cl/mcp
+
+OAUTH_ISSUER=https://at-once.cloudflareaccess.com
+OAUTH_AUDIENCE=ba86613db7f94862d55ca39c2de3d5fb36d50ea19328c3d06d30feda562c34be
+OAUTH_JWKS_URL=https://at-once.cloudflareaccess.com/cdn-cgi/access/certs
+OAUTH_REQUIRED_SCOPES=
+```
+
+Notas:
+
+- `MCP_PUBLIC_URL` debe incluir `/mcp`.
+- `OAUTH_ISSUER` no es el dominio público del MCP. Es el Team Domain de Cloudflare Access.
+- `OAUTH_AUDIENCE` es el **Application Audience (AUD) Tag** de la aplicación Cloudflare Access.
+- `OAUTH_JWKS_URL` normalmente termina en `/cdn-cgi/access/certs`.
+- `OAUTH_REQUIRED_SCOPES` puede quedar vacío si no se validan scopes específicos.
+
+---
+
+## 10. Configuración `.env` completa recomendada
+
+Ejemplo para `docs.at-once.cl`:
 
 ```env
 MCP_CONTAINER_NAME=docs-mcp
@@ -283,7 +266,43 @@ MCP_CONTAINER_PORT=8787
 PORT=8787
 MCP_PORT=8787
 MCP_HOST=0.0.0.0
-MCP_PUBLIC_URL=http://localhost:8787/mcp
+
+MCP_WORKSPACE_HOST_PATH=D:/MCP/workspace
+MCP_WORKSPACE_CONTAINER_PATH=/workspace
+MCP_WORKSPACE_ROOT=/workspace
+
+MCP_MAX_INLINE_BYTES=1000000
+MCP_HTTP_JSON_LIMIT=25mb
+
+MCP_AUTH_MODE=oauth
+MCP_PUBLIC_URL=https://docs.at-once.cl/mcp
+
+OAUTH_ISSUER=https://at-once.cloudflareaccess.com
+OAUTH_AUDIENCE=ba86613db7f94862d55ca39c2de3d5fb36d50ea19328c3d06d30feda562c34be
+OAUTH_JWKS_URL=https://at-once.cloudflareaccess.com/cdn-cgi/access/certs
+OAUTH_REQUIRED_SCOPES=
+```
+
+Los valores concretos de `MCP_PUBLIC_URL` y `OAUTH_AUDIENCE` pueden cambiar por ambiente. No necesariamente deben quedar fijos en el repositorio, pero sí deben estar configurados en el entorno real de Docker o EasyPanel.
+
+---
+
+## 11. `.env.example` obligatorio
+
+El repositorio debe incluir un `.env.example` sin secretos reales.
+
+Ejemplo recomendado:
+
+```env
+MCP_CONTAINER_NAME=docs-mcp
+
+MCP_BIND_ADDRESS=127.0.0.1
+MCP_HOST_PORT=8787
+MCP_CONTAINER_PORT=8787
+
+PORT=8787
+MCP_PORT=8787
+MCP_HOST=0.0.0.0
 
 MCP_WORKSPACE_HOST_PATH=D:/MCP/workspace
 MCP_WORKSPACE_CONTAINER_PATH=/workspace
@@ -293,21 +312,36 @@ MCP_MAX_INLINE_BYTES=1000000
 MCP_HTTP_JSON_LIMIT=25mb
 
 # Auth modes: oauth | api_key | none
-MCP_AUTH_MODE=none
+MCP_AUTH_MODE=oauth
+
+# Public MCP endpoint. Must include /mcp
+MCP_PUBLIC_URL=https://your-mcp-domain.example.com/mcp
 
 # Required only when MCP_AUTH_MODE=api_key
 # MCP_API_KEY=change-me-with-a-long-random-secret
 
-# Required only when MCP_AUTH_MODE=oauth
-# OAUTH_ISSUER=https://auth.example.com
-# OAUTH_AUDIENCE=https://mcp.example.com/mcp
-# OAUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
-# OAUTH_REQUIRED_SCOPES=mcp:read,mcp:write
+# Legacy alias only. Prefer MCP_API_KEY.
+# MCP_AUTH_TOKEN=legacy-api-token
+
+# Required when MCP_AUTH_MODE=oauth
+# For Cloudflare Access, OAUTH_ISSUER is the Cloudflare Access Team Domain.
+OAUTH_ISSUER=https://your-team.cloudflareaccess.com
+
+# For Cloudflare Access, OAUTH_AUDIENCE is the Application Audience (AUD) Tag.
+OAUTH_AUDIENCE=replace-with-cloudflare-access-aud-tag
+
+# For Cloudflare Access, JWKS/certs URL usually ends with /cdn-cgi/access/certs
+OAUTH_JWKS_URL=https://your-team.cloudflareaccess.com/cdn-cgi/access/certs
+
+# Optional. Leave empty if no app-specific scopes are required.
+OAUTH_REQUIRED_SCOPES=
 ```
 
-## 10. Configuración oficial requerida para Docker Compose
+---
 
-### 10.1 `docker-compose.yml` oficial
+## 12. `docker-compose.yml` requerido
+
+El contenedor debe cargar `.env` mediante `env_file`.
 
 ```yaml
 services:
@@ -325,9 +359,14 @@ services:
     restart: unless-stopped
 ```
 
-### 10.2 Reglas para programación
+Puntos obligatorios:
 
-El programador debe corregir `docker-compose.yml` para que no tenga puertos ni rutas rígidas como:
+- `env_file: - .env` debe existir.
+- Los puertos deben ser parametrizables.
+- El volumen debe ser parametrizable.
+- `MCP_WORKSPACE_ROOT` debe coincidir con la ruta interna del contenedor.
+
+No debe quedar hardcodeado así:
 
 ```yaml
 ports:
@@ -336,144 +375,451 @@ volumes:
   - "D:/MCP/workspace:/workspace"
 ```
 
-Debe usar variables:
+---
 
-```yaml
-ports:
-  - "${MCP_BIND_ADDRESS:-127.0.0.1}:${MCP_HOST_PORT:-8787}:${MCP_CONTAINER_PORT:-8787}"
-volumes:
-  - "${MCP_WORKSPACE_HOST_PATH}:${MCP_WORKSPACE_CONTAINER_PATH:-/workspace}"
+## 13. Rebuild obligatorio
+
+Cada vez que cambie:
+
+- `server.mjs`;
+- `.env`;
+- `docker-compose.yml`;
+- `package.json`;
+- dependencias;
+
+se debe reconstruir el contenedor:
+
+```powershell
+cd D:\mcp\docs-mcp; docker compose up -d --build --force-recreate
 ```
 
-También debe incluir obligatoriamente:
+Luego revisar:
 
-```yaml
-env_file:
-  - .env
+```powershell
+docker ps --filter "name=docs-mcp"
 ```
 
-## 11. Middleware de autenticación esperado
+y:
 
-El programador debe implementar una capa única de autenticación antes de ejecutar tools MCP.
-
-Pseudocódigo esperado:
-
-```js
-const AUTH_MODE = process.env.MCP_AUTH_MODE || "none";
-
-async function authMiddleware(req, res, next) {
-  if (AUTH_MODE === "none") {
-    return next();
-  }
-
-  const header = req.headers.authorization || "";
-
-  if (!header.startsWith("Bearer ")) {
-    return unauthorized(res);
-  }
-
-  const token = header.slice("Bearer ".length);
-
-  if (AUTH_MODE === "api_key") {
-    if (!process.env.MCP_API_KEY) {
-      return res.status(500).json({ error: "missing_mcp_api_key" });
-    }
-
-    if (token !== process.env.MCP_API_KEY) {
-      return unauthorized(res);
-    }
-
-    req.auth = { type: "api_key" };
-    return next();
-  }
-
-  if (AUTH_MODE === "oauth") {
-    try {
-      const claims = await verifyOAuthJwt(token, {
-        issuer: process.env.OAUTH_ISSUER,
-        audience: process.env.OAUTH_AUDIENCE,
-        jwksUrl: process.env.OAUTH_JWKS_URL,
-        requiredScopes: (process.env.OAUTH_REQUIRED_SCOPES || "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      });
-
-      req.auth = { type: "oauth", user: claims.sub, claims };
-      return next();
-    } catch {
-      return unauthorized(res);
-    }
-  }
-
-  return res.status(500).json({ error: "invalid_auth_mode" });
-}
-
-function unauthorized(res) {
-  if (process.env.MCP_AUTH_MODE === "oauth") {
-    return res
-      .status(401)
-      .set(
-        "WWW-Authenticate",
-        `Bearer resource_metadata="${resourceMetadataUrl()}"`
-      )
-      .json({ error: "unauthorized" });
-  }
-
-  return res.status(401).json({ error: "unauthorized" });
-}
+```powershell
+docker logs docs-mcp --tail 200
 ```
 
-## 12. Despliegue en ChatGPT según tipo de cuenta
+---
 
-### 12.1 ChatGPT Plus
+## 14. Configuración Cloudflare Access Managed OAuth
 
-Uso recomendado:
+### 14.1 Application type
+
+En Cloudflare Zero Trust:
+
+```text
+Access -> Applications -> Add an application -> Self-hosted
+```
+
+### 14.2 Dominio
+
+Para la app nueva:
+
+```text
+Subdomain: docs
+Domain: at-once.cl
+```
+
+El endpoint MCP real será:
+
+```text
+https://docs.at-once.cl/mcp
+```
+
+---
+
+## 15. Path en Cloudflare Access
+
+En versiones actuales de Cloudflare puede aparecer este error al intentar configurar Path junto con Managed OAuth:
+
+```text
+domain can not have a path if oauth is configured
+```
+
+Si aparece ese error, la aplicación Access debe quedar así:
+
+```text
+Subdomain: docs
+Domain: at-once.cl
+Path: vacío
+Managed OAuth: enabled
+```
+
+Esto significa:
+
+```text
+Cloudflare protege:
+https://docs.at-once.cl
+
+ChatGPT usa:
+https://docs.at-once.cl/mcp
+
+MCP_PUBLIC_URL usa:
+https://docs.at-once.cl/mcp
+```
+
+El Path `/mcp` debe mantenerse en:
+
+```env
+MCP_PUBLIC_URL=https://docs.at-once.cl/mcp
+```
+
+y en ChatGPT:
+
+```text
+https://docs.at-once.cl/mcp
+```
+
+aunque Cloudflare Access no permita configurar Path en la aplicación.
+
+---
+
+## 16. Managed OAuth
+
+Debe estar activado:
+
+```text
+Managed OAuth: enabled
+```
+
+ChatGPT debe usar:
+
+```text
+OAuth
+Registro dinámico de cliente / Dynamic Client Registration / DCR
+```
+
+No se debe usar Client ID / Client Secret manual salvo que se configure otro proveedor OAuth explícitamente.
+
+---
+
+## 17. Allowed Redirect URIs
+
+En Cloudflare Access, agregar:
+
+```text
+https://chatgpt.com/*
+```
+
+También se recomienda agregar:
+
+```text
+https://chat.openai.com/*
+```
+
+Sin estos redirect URIs, Cloudflare puede autenticar al usuario pero fallar al devolver el flujo a ChatGPT.
+
+---
+
+## 18. Policy de acceso
+
+La aplicación Access debe tener una policy que permita al usuario.
+
+Ejemplo:
+
+```text
+Allow -> Emails -> usuario@dominio.com
+```
+
+o:
+
+```text
+Allow -> Emails ending in -> @dominio.com
+```
+
+Durante el flujo, Cloudflare debe mostrar una pantalla similar a:
+
+```text
+Authorize Client
+Client: ChatGPT
+Origin: https://chatgpt.com
+Resource: docs.at-once.cl
+```
+
+El usuario debe presionar:
+
+```text
+Allow
+```
+
+---
+
+## 19. Valores OAuth de Cloudflare
+
+### 19.1 `OAUTH_ISSUER`
+
+Sale del Team Domain de Cloudflare Access.
+
+Ejemplo:
+
+```text
+https://at-once.cloudflareaccess.com
+```
+
+### 19.2 `OAUTH_AUDIENCE`
+
+Sale de:
+
+```text
+Cloudflare Zero Trust
+  -> Access
+  -> Applications
+  -> docs
+  -> Configure
+  -> Additional settings
+  -> Application Audience (AUD) Tag
+```
+
+Para esta app:
+
+```text
+ba86613db7f94862d55ca39c2de3d5fb36d50ea19328c3d06d30feda562c34be
+```
+
+### 19.3 `OAUTH_JWKS_URL`
+
+Se arma con el Team Domain:
+
+```text
+https://at-once.cloudflareaccess.com/cdn-cgi/access/certs
+```
+
+---
+
+## 20. Configuración en ChatGPT
+
+En ChatGPT:
+
+```text
+Settings -> Apps / Connectors -> Developer mode -> Create app / Add MCP app
+```
+
+URL:
+
+```text
+https://docs.at-once.cl/mcp
+```
+
+Autenticación:
+
+```text
+OAuth
+```
+
+Método de registro:
+
+```text
+Dynamic Client Registration / DCR
+```
+
+Scopes:
+
+```text
+vacío
+```
+
+salvo que `OAUTH_REQUIRED_SCOPES` tenga valores.
+
+---
+
+## 21. Validaciones por PowerShell
+
+### 21.1 Revisar `.env`
+
+```powershell
+cd D:\mcp\docs-mcp; Get-Content .env
+```
+
+Debe contener:
 
 ```env
 MCP_AUTH_MODE=oauth
+MCP_PUBLIC_URL=https://docs.at-once.cl/mcp
+OAUTH_ISSUER=https://at-once.cloudflareaccess.com
+OAUTH_AUDIENCE=ba86613db7f94862d55ca39c2de3d5fb36d50ea19328c3d06d30feda562c34be
+OAUTH_JWKS_URL=https://at-once.cloudflareaccess.com/cdn-cgi/access/certs
+OAUTH_REQUIRED_SCOPES=
 ```
 
-En ChatGPT:
+### 21.2 Validar que `server.mjs` tenga `Cf-Access-Jwt-Assertion`
+
+```powershell
+cd D:\mcp\docs-mcp; Select-String -Path server.mjs -Pattern "cf-access-jwt-assertion|getBearerToken" -Context 0,12
+```
+
+Debe aparecer:
+
+```js
+const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
+if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
+  return normalizeToken(cfAccessJwt);
+}
+```
+
+### 21.3 Rebuild
+
+```powershell
+cd D:\mcp\docs-mcp; docker compose up -d --build --force-recreate
+```
+
+### 21.4 Ver contenedor
+
+```powershell
+docker ps --filter "name=docs-mcp"
+```
+
+Debe aparecer:
 
 ```text
-Autenticación -> OAuth
+docs-mcp
+127.0.0.1:8787->8787/tcp
 ```
 
-Motivo: en cuentas Plus puede no aparecer la opción `Token de acceso / clave de API`.
+o el puerto configurado en el ambiente.
 
-### 12.2 ChatGPT Empresa / Business
+### 21.5 Ver logs
 
-Uso recomendado cuando la UI muestre token/API key:
-
-```env
-MCP_AUTH_MODE=api_key
-MCP_API_KEY=<token-largo-generado-para-ese-cliente>
+```powershell
+docker logs docs-mcp --tail 200
 ```
 
-En ChatGPT:
+Debe mostrar:
 
 ```text
-Autenticación -> Token de acceso / clave de API
+docs-mcp listening on http://0.0.0.0:8787
+MCP endpoint available at http://0.0.0.0:8787/mcp
 ```
 
-### 12.3 Prueba local sin autenticación
+### 21.6 Probar endpoint local sin token
 
-Uso permitido solo para prueba:
-
-```env
-MCP_AUTH_MODE=none
+```powershell
+Invoke-WebRequest -Uri http://127.0.0.1:8787/mcp -Method GET
 ```
 
-En ChatGPT:
+Respuesta esperada en OAuth:
 
-```text
-Autenticación -> Sin autenticación
+```json
+{"error":"Unauthorized","message":"Missing Bearer token"}
 ```
 
-## 13. Compatibilidad de raíz para agentes IA
+Esto es correcto: el MCP está vivo y exige token.
 
-El servidor debe aceptar como raíz del workspace cualquiera de las siguientes variantes al usar `list_files` o herramientas equivalentes de navegación:
+### 21.7 Probar endpoint público sin token
+
+```powershell
+try { Invoke-WebRequest -Uri "https://docs.at-once.cl/mcp" -Method GET -UseBasicParsing } catch { $_.Exception.Response.Headers["WWW-Authenticate"] }
+```
+
+Debe devolver un header `WWW-Authenticate` de tipo Bearer/OAuth.
+
+### 21.8 Probar Authorization Server
+
+```powershell
+(Invoke-WebRequest -Uri "https://at-once.cloudflareaccess.com/.well-known/oauth-authorization-server" -Method GET -UseBasicParsing).Content
+```
+
+Debe incluir:
+
+```json
+"registration_endpoint"
+```
+
+Esto confirma soporte de Dynamic Client Registration.
+
+### 21.9 Probar metadata local del MCP
+
+```powershell
+(Invoke-WebRequest -Uri "http://127.0.0.1:8787/.well-known/oauth-protected-resource" -Method GET -UseBasicParsing).Content
+```
+
+Debe devolver algo equivalente a:
+
+```json
+{
+  "resource": "https://docs.at-once.cl/mcp",
+  "authorization_servers": ["https://at-once.cloudflareaccess.com"],
+  "scopes_supported": [],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+---
+
+## 22. Checklist de aceptación para programación
+
+El entregable se acepta solo si cumple todo esto:
+
+- [ ] `server.mjs` contiene `cf-access-jwt-assertion`.
+- [ ] `getBearerToken(req)` lee `Authorization: Bearer`.
+- [ ] `getBearerToken(req)` lee `Cf-Access-Jwt-Assertion`.
+- [ ] `requireAuth(req, res)` usa `getBearerToken(req)`.
+- [ ] OAuth valida JWT con `issuer`, `audience` y JWKS.
+- [ ] `OAUTH_REQUIRED_SCOPES` vacío no bloquea acceso.
+- [ ] `.env.example` explica Cloudflare Access.
+- [ ] `docker-compose.yml` contiene `env_file: - .env`.
+- [ ] Docker se reconstruyó después del cambio.
+- [ ] ChatGPT llega hasta Cloudflare `Allow`.
+- [ ] Después del `Allow`, ChatGPT puede listar tools MCP.
+- [ ] ChatGPT puede ejecutar al menos una tool real como `list_files` o `write_file`.
+
+---
+
+## 23. Criterio de rechazo del entregable
+
+El entregable debe rechazarse si ocurre cualquiera de estos casos:
+
+1. `server.mjs` no contiene `cf-access-jwt-assertion`.
+2. `getBearerToken(req)` solo lee `Authorization`.
+3. `.env` real del ambiente no contiene `MCP_AUTH_MODE=oauth`.
+4. `MCP_PUBLIC_URL` no termina en `/mcp`.
+5. `OAUTH_AUDIENCE` no corresponde al AUD Tag de la aplicación Cloudflare Access correcta.
+6. `docker-compose.yml` no carga `.env`.
+7. Se modificó código o configuración pero no se reconstruyó el contenedor.
+8. ChatGPT llega a `Allow` pero el MCP sigue respondiendo `Missing Bearer token`.
+
+---
+
+## 24. Tools MCP esperadas
+
+El servidor debe exponer al menos estas tools:
+
+| Tool | Propósito |
+|---|---|
+| `list_files` | Lista archivos dentro del workspace permitido. |
+| `read_file` | Lee el contenido de un archivo dentro del workspace. |
+| `write_file` | Crea o reemplaza un archivo dentro del workspace. |
+| `delete_path` | Borra un archivo o carpeta dentro del workspace. |
+| `make_dir` | Crea un directorio dentro del workspace. |
+| `stat_path` | Devuelve metadata de archivo o carpeta. |
+| `search_files` | Busca archivos por nombre o contenido. |
+| `git_status` | Muestra el estado Git del workspace. |
+
+---
+
+## 25. Seguridad de filesystem
+
+El servidor debe cumplir estas reglas:
+
+1. Todas las rutas deben resolverse dentro del workspace configurado.
+2. No se deben permitir rutas absolutas.
+3. No se debe permitir traversal fuera del workspace.
+4. Las operaciones destructivas deben estar claramente identificadas.
+5. `.env` no debe versionarse.
+6. Tokens, llaves privadas y secretos no deben versionarse.
+7. No se debe aceptar token por query string.
+8. En exposición pública, no usar `MCP_AUTH_MODE=none`.
+
+---
+
+## 26. Compatibilidad de raíz para agentes IA
+
+El servidor debe aceptar como raíz del workspace cualquiera de estas variantes:
 
 ```text
 relative_dir omitido
@@ -482,138 +828,136 @@ relative_dir = "./"
 relative_dir = ""
 ```
 
-Todas esas variantes deben resolverse internamente como la raíz configurada en `MCP_WORKSPACE_ROOT`.
+Todas deben resolverse como `MCP_WORKSPACE_ROOT`.
 
-Esta compatibilidad no debe relajar la seguridad: rutas absolutas, rutas fuera del workspace e intentos de traversal deben seguir siendo rechazados.
+Esto no debe permitir salir del workspace.
 
-## 14. Corrección obligatoria: multisesión y transporte MCP
+---
 
-La versión oficial debe corregir el manejo multisesión del endpoint `/mcp`.
+## 27. Multisesión MCP
 
-### 14.1 Error detectado
+El servidor no debe reutilizar una única instancia global de `McpServer` para múltiples transports.
 
-Durante la prueba local, el servicio respondía correctamente a:
+Debe cumplir:
 
-```text
-GET /health
-```
+1. Crear una instancia `McpServer` por sesión o request según corresponda.
+2. Registrar tools mediante una función común, por ejemplo `registerTools(server)`.
+3. Mantener sesiones con `{ server, transport }`.
+4. Reutilizar sesión cuando venga `mcp-session-id` válido.
+5. Cerrar transporte y servidor cuando corresponda.
 
-pero fallaba al probar:
-
-```text
-POST /mcp
-method: initialize
-```
-
-con el error:
+El error que se debe evitar es:
 
 ```text
 Already connected to a transport. Call close() before connecting to a new transport, or use a separate Protocol instance per connection.
 ```
 
-### 14.2 Causa
+---
 
-La causa es una arquitectura incorrecta en `server.mjs`:
+## 28. Resultado esperado final
 
-```js
-const server = new McpServer(...)
+La configuración se considera correcta cuando:
+
+1. Docker levanta `docs-mcp` sin errores.
+2. `/health` responde correctamente.
+3. `/mcp` responde `Unauthorized` sin token.
+4. Cloudflare Access muestra `Authorize Client` para ChatGPT.
+5. Después de `Allow`, ChatGPT conecta.
+6. ChatGPT muestra las tools MCP.
+7. ChatGPT puede ejecutar `list_files`.
+8. ChatGPT puede ejecutar `write_file`.
+9. No aparece `Missing Bearer token` después de una autorización Cloudflare exitosa.
+
+---
+
+## 29. Resumen ejecutivo para programación
+
+La corrección más importante es esta:
+
+```text
+Aceptar JWT desde Authorization: Bearer y desde Cf-Access-Jwt-Assertion.
 ```
 
-creado como instancia global, y luego reutilizado con:
+El error típico del programa incompleto es este:
 
-```js
-await server.connect(transport)
+```text
+Solo acepta Authorization: Bearer.
 ```
 
-para más de un transporte.
+La consecuencia es esta:
 
-Cada sesión o request stateless debe usar su propia instancia de servidor/protocolo.
+```text
+Cloudflare puede autorizar correctamente, pero docs-mcp rechaza la conexión después del Allow.
+```
 
-### 14.3 Corrección requerida
+La solución es modificar `getBearerToken(req)`, configurar `.env` del entorno y reconstruir el contenedor.
 
-Programación debe refactorizar `server.mjs` con este criterio:
+---
 
-1. Mover el registro de tools a una función `registerTools(server)`.
-2. Crear una función `createMcpServer()` que instancie un nuevo `McpServer` y registre las tools.
-3. No mantener un `McpServer` global conectado.
-4. Mantener un mapa de sesiones con objetos `{ server, transport }`, no solo `transport`.
-5. Para requests con `mcp-session-id`, reutilizar el par `{ server, transport }` de esa sesión.
-6. Para `initialize` sin sesión, crear un nuevo contexto de sesión.
-7. Para requests stateless sin sesión, crear un `McpServer` nuevo y cerrar el transporte al terminar.
-8. En `DELETE /mcp`, cerrar el transporte y eliminar la sesión del mapa.
+## 30. Comandos útiles
 
-## 15. Esquema de salida recomendado
+Clonar:
 
-Las tools deben devolver salida legible en `content` y salida estructurada en `structuredContent`.
+```powershell
+mkdir D:\mcp
+cd D:\mcp
+git clone https://github.com/mcandiav/docs-mcp.git
+```
 
-| Tool | `structuredContent` esperado |
-|---|---|
-| `list_files` | `{ files }` |
-| `read_file` | `{ relative_path, encoding, bytes, content }` |
-| `write_file` | `{ relative_path, encoding, bytes_written }` |
-| `delete_path` | `{ relative_path, deleted, reason? }` |
-| `make_dir` | `{ relative_dir, created }` |
-| `stat_path` | `{ relative_path, is_file, is_dir, size, mtime }` |
-| `search_files` | `{ query, results }` |
-| `git_status` | `{ branch, status }` |
+Revisar `.env`:
 
-## 16. Validación obligatoria
+```powershell
+cd D:\mcp\docs-mcp; Get-Content .env
+```
 
-Después de modificar el programa, programación debe validar:
+Verificar `Cf-Access-Jwt-Assertion` en código:
 
-1. reconstruir y recrear el contenedor;
-2. confirmar que `GET /health` responde `ok: true`;
-3. confirmar que `/health` muestra `workspaceRoot` igual a `MCP_WORKSPACE_ROOT`;
-4. confirmar que `POST /mcp` con `initialize` no devuelve `Already connected to a transport`;
-5. confirmar que `MCP_AUTH_MODE=none` permite operar solo en entorno de prueba;
-6. confirmar que `MCP_AUTH_MODE=api_key` rechaza requests sin token;
-7. confirmar que `MCP_AUTH_MODE=api_key` acepta `Authorization: Bearer <MCP_API_KEY>`;
-8. confirmar que `MCP_AUTH_MODE=oauth` publica `/.well-known/oauth-protected-resource`;
-9. confirmar que `MCP_AUTH_MODE=oauth` rechaza tokens vencidos, inválidos o sin scope;
-10. confirmar que ChatGPT puede ejecutar `list_files`;
-11. confirmar que al listar un workspace vacío devuelve `{ files: [] }` y no error 502;
-12. confirmar que al agregar archivos al volumen, `list_files` los muestra;
-13. confirmar que el comportamiento se mantiene detrás de Cloudflare Tunnel y no solo en `localhost`.
+```powershell
+cd D:\mcp\docs-mcp; Select-String -Path server.mjs -Pattern "cf-access-jwt-assertion|getBearerToken" -Context 0,12
+```
 
-## 17. Documentos y archivos relevantes
+Recrear contenedor:
 
-| Archivo | Uso |
-|---|---|
-| `README.md` | Instructivo técnico oficial del proyecto activo `docs-mcp`. |
-| `server.mjs` | Implementación del servidor MCP HTTP. |
-| `package.json` | Metadata, dependencias y script de arranque. |
-| `Dockerfile` | Imagen del servicio. |
-| `docker-compose.yml` | Ejecución local o en host Docker. Debe usar variables para puertos y volumen. |
-| `.dockerignore` | Exclusiones de build Docker. |
-| `.gitignore` | Debe excluir `.env`, `node_modules`, logs y artefactos temporales. |
-| `.env.example` | Plantilla versionable de variables sin secretos reales. |
-| `.env.default` | Plantilla opcional equivalente a `.env.example` si se prefiere ese nombre. |
-| `.env` | Archivo local real. No debe versionarse. |
-| `obsoleto/doc-mcp/README.md` | Referencia histórica de la versión anterior. |
-| `../README.md` | Índice general del workspace MCPacer. No reemplaza este instructivo. |
+```powershell
+cd D:\mcp\docs-mcp; docker compose up -d --build --force-recreate
+```
 
-## 18. Estado actual
+Ver contenedor:
 
-Estado documental: actualizado para dejar explícito que el proyecto debe soportar autenticación configurable por `.env` en modos `oauth`, `api_key` y `none`.
+```powershell
+docker ps --filter "name=docs-mcp"
+```
 
-Estado funcional esperado antes de llevar a GitHub: pendiente de que programación incorpore la corrección multisesión en `server.mjs`, implemente el middleware de autenticación configurable, corrija `docker-compose.yml`, agregue o actualice `.env.example`, reconstruya la imagen y valide el conector.
+Ver logs:
 
-Puntos que deben revisarse antes de considerar cerrada la consolidación:
+```powershell
+docker logs docs-mcp --tail 200
+```
 
-1. Confirmar que `server.mjs` crea un `McpServer` nuevo por sesión o request.
-2. Confirmar que ya no existe una instancia global conectada a múltiples transports.
-3. Confirmar que `POST /mcp` con `initialize` no devuelve `Already connected to a transport`.
-4. Confirmar que ChatGPT puede ejecutar `list_files` sin error 502.
-5. Confirmar que `/health` muestra `workspaceRoot` igual a `MCP_WORKSPACE_ROOT`.
-6. Confirmar que `docker-compose.yml` contiene `env_file: - .env`.
-7. Confirmar que `docker-compose.yml` parametriza `ports` desde `MCP_BIND_ADDRESS`, `MCP_HOST_PORT` y `MCP_CONTAINER_PORT`.
-8. Confirmar que `docker-compose.yml` parametriza `volumes` desde `MCP_WORKSPACE_HOST_PATH` y `MCP_WORKSPACE_CONTAINER_PATH`.
-9. Confirmar que `.env.example` existe y contiene valores seguros por defecto, incluyendo `MCP_AUTH_MODE`.
-10. Confirmar que `.env` queda excluido de Git.
-11. Confirmar que `MCP_AUTH_MODE=api_key` funciona con `Authorization: Bearer <MCP_API_KEY>`.
-12. Confirmar que `MCP_AUTH_MODE=oauth` funciona con OAuth y publica metadata de recurso protegido.
-13. Confirmar que `MCP_AUTH_MODE=none` queda documentado solo para pruebas.
-14. Confirmar que `package.json` y el nombre del servidor MCP reflejan el nombre oficial final.
-15. Confirmar que `obsoleto/doc-mcp` queda solo como trazabilidad histórica.
-16. Validar despliegue desde GitHub en Docker Desktop y EasyPanel.
-17. Subir la corrección a GitHub solo después de validar localmente y por túnel.
+Probar endpoint local:
+
+```powershell
+Invoke-WebRequest -Uri http://127.0.0.1:8787/mcp -Method GET
+```
+
+Probar endpoint público:
+
+```powershell
+try { Invoke-WebRequest -Uri "https://docs.at-once.cl/mcp" -Method GET -UseBasicParsing } catch { $_.Exception.Response.Headers["WWW-Authenticate"] }
+```
+
+Probar Authorization Server:
+
+```powershell
+(Invoke-WebRequest -Uri "https://at-once.cloudflareaccess.com/.well-known/oauth-authorization-server" -Method GET -UseBasicParsing).Content
+```
+
+---
+
+## 31. Estado de mantenimiento
+
+Este README es la fuente de verdad técnica.
+
+Toda corrección futura de arquitectura, seguridad, OAuth, Docker, EasyPanel o Cloudflare debe incorporarse aquí.
+
+Si existe contradicción entre README y código, se debe corregir el código o actualizar formalmente esta documentación antes de entregar.

@@ -436,6 +436,12 @@ function getBearerToken(req) {
     const match = auth.trim().match(/^Bearer\s+(.+)$/i);
     if (match?.[1]) return normalizeToken(match[1]);
   }
+
+  const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
+  if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
+    return normalizeToken(cfAccessJwt);
+  }
+
   return null;
 }
 
@@ -655,4 +661,5 @@ app.listen(PORT, HOST, () => {
   console.log(`docs-mcp listening on http://${HOST}:${PORT}`);
   console.log(`MCP endpoint available at http://${HOST}:${PORT}/mcp`);
 });
+
 
