@@ -17,11 +17,8 @@ app.use(express.json({ limit: process.env.MCP_HTTP_JSON_LIMIT ?? "25mb" }));
 const PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 8787);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
 const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.trim() || `http://localhost:${PORT}/mcp`;
-const WORKSPACE_ROOT = path.resolve(process.env.MCP_WORKSPACE_ROOT ?? process.cwd());
+const WORKSPACES_ROOT = path.resolve(process.env.MCP_WORKSPACES_ROOT ?? process.env.MCP_WORKSPACE_ROOT ?? path.join(process.cwd(), "workspaces"));
 const MAX_INLINE_BYTES = Number(process.env.MCP_MAX_INLINE_BYTES ?? 1_000_000);
-const AUTH_MODE = (process.env.MCP_AUTH_MODE ?? "none").trim().toLowerCase();
-const MCP_API_KEY = process.env.MCP_API_KEY?.trim() || process.env.MCP_AUTH_TOKEN?.trim() || "";
-const NORMALIZED_API_KEY = normalizeToken(MCP_API_KEY);
 const OAUTH_ISSUER = process.env.OAUTH_ISSUER?.trim() || "";
 const OAUTH_AUDIENCE = process.env.OAUTH_AUDIENCE?.trim() || "";
 const OAUTH_JWKS_URL = process.env.OAUTH_JWKS_URL?.trim() || "";
@@ -29,6 +26,131 @@ const OAUTH_REQUIRED_SCOPES = (process.env.OAUTH_REQUIRED_SCOPES ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+const SAFE_WORKSPACE_NAME_REGEX = /[^a-zA-Z0-9_.-]/g;
+
+function normalizeToken(value) {
+  if (!value || typeof value !== "string") return "";
+  const trimmed = value.trim();
+  const match = trimmed.match(/^Bearer\s+(.+)$/i);
+  return (match ? match[1] : trimmed).trim();
+}
+
+function getBearerToken(req) {
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.trim()) {
+    const match = auth.trim().match(/^Bearer\s+(.+)$/i);
+    if (match?.[1]) return normalizeToken(match[1]);
+  }
+
+  const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
+  if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
+    return normalizeToken(cfAccessJwt);
+  }
+
+  return null;
+}
+
+function resourceMetadataUrl() {
+  return MCP_PUBLIC_URL.endsWith("/mcp")
+    ? `${MCP_PUBLIC_URL.slice(0, -4)}/.well-known/oauth-protected-resource`
+    : `${MCP_PUBLIC_URL}/.well-known/oauth-protected-resource`;
+}
+
+function unauthorized(res, message = "unauthorized") {
+  res.set("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl()}"`);
+  res.status(401).json({
+    error: "Unauthorized",
+    message
+  });
+}
+
+function ensureAuthConfig() {
+  if (!MCP_PUBLIC_URL || !OAUTH_ISSUER || !OAUTH_AUDIENCE || !OAUTH_JWKS_URL) {
+    throw new Error("OAuth obligatorio: define MCP_PUBLIC_URL, OAUTH_ISSUER, OAUTH_AUDIENCE y OAUTH_JWKS_URL.");
+  }
+}
+
+let oauthJwks = null;
+function getOauthJwks() {
+  if (!oauthJwks) {
+    oauthJwks = createRemoteJWKSet(new URL(OAUTH_JWKS_URL));
+  }
+  return oauthJwks;
+}
+
+function hasRequiredScopes(payloadScopes, requiredScopes) {
+  if (!requiredScopes.length) return true;
+  const set = new Set(
+    String(payloadScopes ?? "")
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  return requiredScopes.every((scope) => set.has(scope));
+}
+
+function normalizeWorkspaceNameFromEmail(email) {
+  const trimmed = String(email ?? "").trim().toLowerCase();
+  if (!trimmed || !trimmed.includes("@")) {
+    throw new Error("El token no contiene un email valido.");
+  }
+  const normalized = trimmed.replace(/@/g, "_").replace(SAFE_WORKSPACE_NAME_REGEX, "_");
+  const collapsed = normalized.replace(/_+/g, "_").replace(/^[_\.\-]+|[_\.\-]+$/g, "");
+  if (!collapsed) {
+    throw new Error("No fue posible resolver workspace desde email.");
+  }
+  return collapsed;
+}
+
+async function requireAuth(req, res) {
+  const token = getBearerToken(req);
+  if (!token) {
+    unauthorized(res, "Missing Bearer token");
+    return null;
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, getOauthJwks(), {
+      issuer: OAUTH_ISSUER,
+      audience: OAUTH_AUDIENCE
+    });
+
+    if (!hasRequiredScopes(payload.scope, OAUTH_REQUIRED_SCOPES)) {
+      unauthorized(res, "Insufficient scope");
+      return null;
+    }
+
+    const email = String(payload.email ?? "").trim();
+    if (!email) {
+      unauthorized(res, "Token without email claim");
+      return null;
+    }
+
+    return { payload, email };
+  } catch {
+    unauthorized(res, "Invalid or expired OAuth token");
+    return null;
+  }
+}
+
+async function getWorkspaceForRequest(req, res) {
+  const auth = await requireAuth(req, res);
+  if (!auth) return null;
+
+  const workspaceName = normalizeWorkspaceNameFromEmail(auth.email);
+  const workspaceRoot = path.resolve(WORKSPACES_ROOT, workspaceName);
+  await fs.mkdir(workspaceRoot, { recursive: true });
+  const workspaceRootReal = await fs.realpath(workspaceRoot);
+
+  return {
+    auth,
+    workspaceName,
+    workspaceRoot,
+    workspaceRootReal,
+    ownerKey: auth.email.toLowerCase()
+  };
+}
 
 function normalizeRelativePath(relativePath, { allowWorkspaceRoot = false } = {}) {
   if (typeof relativePath !== "string") {
@@ -45,6 +167,10 @@ function normalizeRelativePath(relativePath, { allowWorkspaceRoot = false } = {}
     return ".";
   }
 
+  if (path.isAbsolute(normalizedInput)) {
+    throw new Error("No se permiten rutas absolutas.");
+  }
+
   const p = normalizedInput.replace(/\\/g, "/").replace(/^\/+/, "");
   if (!p || p === ".") {
     if (allowWorkspaceRoot) return ".";
@@ -58,18 +184,9 @@ function normalizeRelativePath(relativePath, { allowWorkspaceRoot = false } = {}
   return p;
 }
 
-function resolveSafePath(relativePath, options = {}) {
-  const normalized = normalizeRelativePath(relativePath, options);
-  if (normalized === ".") return WORKSPACE_ROOT;
-
-  const fullPath = path.resolve(WORKSPACE_ROOT, normalized);
-  const rootWithSep = WORKSPACE_ROOT.endsWith(path.sep) ? WORKSPACE_ROOT : WORKSPACE_ROOT + path.sep;
-
-  if (fullPath !== WORKSPACE_ROOT && !fullPath.startsWith(rootWithSep)) {
-    throw new Error("Ruta fuera del workspace permitido.");
-  }
-
-  return fullPath;
+function ensureWithinRoot(candidatePath, rootPath) {
+  const rootWithSep = rootPath.endsWith(path.sep) ? rootPath : rootPath + path.sep;
+  return candidatePath === rootPath || candidatePath.startsWith(rootWithSep);
 }
 
 function toPosixRelative(p) {
@@ -78,6 +195,56 @@ function toPosixRelative(p) {
 
 function isProbablyText(buffer) {
   return !buffer.includes(0);
+}
+
+function createPathResolver(workspaceRoot, workspaceRootReal) {
+  async function verifyNoSymlinkEscape(targetPath, { mustExist } = { mustExist: false }) {
+    const resolvedTarget = path.resolve(targetPath);
+    if (!ensureWithinRoot(resolvedTarget, workspaceRoot)) {
+      throw new Error("Ruta fuera del workspace permitido.");
+    }
+
+    const targetExists = await fs.lstat(resolvedTarget).then(() => true).catch(() => false);
+
+    if (targetExists) {
+      const real = await fs.realpath(resolvedTarget);
+      if (!ensureWithinRoot(real, workspaceRootReal)) {
+        throw new Error("Symlink fuera del workspace permitido.");
+      }
+      return;
+    }
+
+    if (mustExist) {
+      throw new Error("Path no existe.");
+    }
+
+    let current = path.dirname(resolvedTarget);
+    while (true) {
+      const exists = await fs.lstat(current).then(() => true).catch(() => false);
+      if (exists) {
+        const real = await fs.realpath(current);
+        if (!ensureWithinRoot(real, workspaceRootReal)) {
+          throw new Error("Symlink fuera del workspace permitido.");
+        }
+        return;
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) {
+        throw new Error("Ruta invalida.");
+      }
+      current = parent;
+    }
+  }
+
+  return async function resolveSafePath(relativePath, options = {}) {
+    const normalized = normalizeRelativePath(relativePath, options);
+    if (normalized === ".") return workspaceRoot;
+
+    const fullPath = path.resolve(workspaceRoot, normalized);
+    await verifyNoSymlinkEscape(fullPath, { mustExist: false });
+    return fullPath;
+  };
 }
 
 async function walkFiles(dir, baseDir, options, results = []) {
@@ -104,7 +271,9 @@ async function walkFiles(dir, baseDir, options, results = []) {
   return results;
 }
 
-function registerTools(server) {
+function registerTools(server, workspaceContext) {
+  const { workspaceRoot, resolveSafePath } = workspaceContext;
+
   server.registerTool(
     "list_files",
     {
@@ -121,21 +290,21 @@ function registerTools(server) {
       }
     },
     async ({ relative_dir, recursive, include_hidden, max_results }) => {
-      const dirPath = resolveSafePath(relative_dir, { allowWorkspaceRoot: true });
+      const dirPath = await resolveSafePath(relative_dir, { allowWorkspaceRoot: true });
       const st = await fs.stat(dirPath);
       if (!st.isDirectory()) {
         throw new Error("relative_dir debe ser un directorio.");
       }
 
       const files = recursive
-        ? await walkFiles(dirPath, WORKSPACE_ROOT, {
+        ? await walkFiles(dirPath, workspaceRoot, {
             includeHidden: include_hidden,
             maxResults: max_results
           })
         : (await fs.readdir(dirPath, { withFileTypes: true }))
             .filter((e) => e.isFile())
             .filter((e) => include_hidden || !e.name.startsWith("."))
-            .map((e) => toPosixRelative(path.relative(WORKSPACE_ROOT, path.join(dirPath, e.name))));
+            .map((e) => toPosixRelative(path.relative(workspaceRoot, path.join(dirPath, e.name))));
 
       return {
         content: [
@@ -169,7 +338,7 @@ function registerTools(server) {
       }
     },
     async ({ relative_path, encoding, max_bytes }) => {
-      const fullPath = resolveSafePath(relative_path);
+      const fullPath = await resolveSafePath(relative_path);
       const data = await fs.readFile(fullPath);
       if (data.byteLength > max_bytes) {
         throw new Error(`Archivo demasiado grande para inline (${data.byteLength} bytes). Ajusta max_bytes.`);
@@ -217,7 +386,7 @@ function registerTools(server) {
       }
     },
     async ({ relative_path, content, encoding, create_dirs }) => {
-      const fullPath = resolveSafePath(relative_path);
+      const fullPath = await resolveSafePath(relative_path);
       if (create_dirs) {
         await fs.mkdir(path.dirname(fullPath), { recursive: true });
       }
@@ -256,7 +425,7 @@ function registerTools(server) {
       }
     },
     async ({ relative_path, recursive }) => {
-      const fullPath = resolveSafePath(relative_path);
+      const fullPath = await resolveSafePath(relative_path);
       const st = await fs.stat(fullPath).catch(() => null);
       if (!st) {
         return {
@@ -296,7 +465,7 @@ function registerTools(server) {
       }
     },
     async ({ relative_dir, recursive }) => {
-      const fullPath = resolveSafePath(relative_dir);
+      const fullPath = await resolveSafePath(relative_dir);
       await fs.mkdir(fullPath, { recursive });
       return {
         content: [{ type: "text", text: `Directorio creado: ${relative_dir}` }],
@@ -322,7 +491,7 @@ function registerTools(server) {
       }
     },
     async ({ relative_path }) => {
-      const fullPath = resolveSafePath(relative_path);
+      const fullPath = await resolveSafePath(relative_path);
       const st = await fs.stat(fullPath);
       const info = {
         relative_path,
@@ -361,11 +530,11 @@ function registerTools(server) {
       }
     },
     async ({ query, relative_dir, match, case_sensitive, max_results }) => {
-      const dirPath = resolveSafePath(relative_dir, { allowWorkspaceRoot: true });
+      const dirPath = await resolveSafePath(relative_dir, { allowWorkspaceRoot: true });
       const st = await fs.stat(dirPath);
       if (!st.isDirectory()) throw new Error("relative_dir debe ser un directorio.");
 
-      const files = await walkFiles(dirPath, WORKSPACE_ROOT, { maxResults: 50_000, includeHidden: true });
+      const files = await walkFiles(dirPath, workspaceRoot, { maxResults: 50_000, includeHidden: true });
       const q = case_sensitive ? query : query.toLowerCase();
 
       const hits = [];
@@ -376,7 +545,7 @@ function registerTools(server) {
         let contentPreview;
 
         if (!ok && match === "name_or_content") {
-          const p = resolveSafePath(rel);
+          const p = await resolveSafePath(rel);
           const buf = await fs.readFile(p).catch(() => null);
           if (buf && buf.byteLength <= 200_000 && isProbablyText(buf)) {
             const txt = buf.toString("utf8");
@@ -410,7 +579,7 @@ function registerTools(server) {
     "git_status",
     {
       title: "Estado Git",
-      description: "Muestra el estado Git del workspace de prueba.",
+      description: "Muestra el estado Git del workspace autenticado.",
       inputSchema: {},
       outputSchema: {
         branch: z.string(),
@@ -419,10 +588,10 @@ function registerTools(server) {
     },
     async () => {
       const { stdout: shortStatus } = await execFileAsync("git", ["status", "--short"], {
-        cwd: WORKSPACE_ROOT
+        cwd: workspaceRoot
       });
       const { stdout: branch } = await execFileAsync("git", ["branch", "--show-current"], {
-        cwd: WORKSPACE_ROOT
+        cwd: workspaceRoot
       });
 
       const statusText = [`branch: ${branch.trim() || "(sin rama)"}`, "", shortStatus.trim() || "(working tree limpio)"].join("\n");
@@ -443,134 +612,27 @@ function registerTools(server) {
   );
 }
 
-function createMcpServer() {
+function createMcpServer(workspaceContext) {
   const server = new McpServer({
-    name: "docs-mcp",
+    name: "mcp-oauth",
     version: "1.0.0"
   });
-  registerTools(server);
+  registerTools(server, workspaceContext);
   return server;
 }
 
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "docs-mcp",
+    service: "mcp-oauth",
     host: HOST,
     port: PORT,
-    authMode: AUTH_MODE,
-    workspaceRoot: WORKSPACE_ROOT,
+    workspacesRoot: WORKSPACES_ROOT,
     maxInlineBytes: MAX_INLINE_BYTES,
-    authEnabled: AUTH_MODE !== "none",
+    oauthIssuer: OAUTH_ISSUER,
     time: new Date().toISOString()
   });
 });
-
-function normalizeToken(value) {
-  if (!value || typeof value !== "string") return "";
-  const trimmed = value.trim();
-  const match = trimmed.match(/^Bearer\s+(.+)$/i);
-  return (match ? match[1] : trimmed).trim();
-}
-
-function getBearerToken(req) {
-  const auth = req.headers.authorization;
-  if (typeof auth === "string" && auth.trim()) {
-    const match = auth.trim().match(/^Bearer\s+(.+)$/i);
-    if (match?.[1]) return normalizeToken(match[1]);
-  }
-
-  const cfAccessJwt = req.headers["cf-access-jwt-assertion"];
-  if (typeof cfAccessJwt === "string" && cfAccessJwt.trim()) {
-    return normalizeToken(cfAccessJwt);
-  }
-
-  return null;
-}
-
-function resourceMetadataUrl() {
-  return MCP_PUBLIC_URL.endsWith("/mcp")
-    ? `${MCP_PUBLIC_URL.slice(0, -4)}/.well-known/oauth-protected-resource`
-    : `${MCP_PUBLIC_URL}/.well-known/oauth-protected-resource`;
-}
-
-function unauthorized(res, message = "unauthorized") {
-  if (AUTH_MODE === "oauth") {
-    res.set("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl()}"`);
-  }
-  res.status(401).json({
-    error: "Unauthorized",
-    message
-  });
-}
-
-function ensureAuthConfig() {
-  if (!["none", "api_key", "oauth"].includes(AUTH_MODE)) {
-    throw new Error("MCP_AUTH_MODE invalido. Usa: none, api_key u oauth.");
-  }
-  if (AUTH_MODE === "api_key" && !NORMALIZED_API_KEY) {
-    throw new Error("MCP_AUTH_MODE=api_key requiere MCP_API_KEY (o alias MCP_AUTH_TOKEN).");
-  }
-  if (AUTH_MODE === "oauth") {
-    if (!MCP_PUBLIC_URL || !OAUTH_ISSUER || !OAUTH_AUDIENCE || !OAUTH_JWKS_URL) {
-      throw new Error("MCP_AUTH_MODE=oauth requiere MCP_PUBLIC_URL, OAUTH_ISSUER, OAUTH_AUDIENCE y OAUTH_JWKS_URL.");
-    }
-  }
-}
-
-let oauthJwks = null;
-function getOauthJwks() {
-  if (!oauthJwks) {
-    oauthJwks = createRemoteJWKSet(new URL(OAUTH_JWKS_URL));
-  }
-  return oauthJwks;
-}
-
-function hasRequiredScopes(payloadScopes, requiredScopes) {
-  if (!requiredScopes.length) return true;
-  const set = new Set(
-    String(payloadScopes ?? "")
-      .split(/\s+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
-  return requiredScopes.every((scope) => set.has(scope));
-}
-
-async function requireAuth(req, res) {
-  if (AUTH_MODE === "none") return true;
-
-  const token = getBearerToken(req);
-  if (!token) {
-    unauthorized(res, "Missing Bearer token");
-    return false;
-  }
-
-  if (AUTH_MODE === "api_key") {
-    if (token !== NORMALIZED_API_KEY) {
-      unauthorized(res, "Invalid API key");
-      return false;
-    }
-    return true;
-  }
-
-  try {
-    const { payload } = await jwtVerify(token, getOauthJwks(), {
-      issuer: OAUTH_ISSUER,
-      audience: OAUTH_AUDIENCE
-    });
-
-    if (!hasRequiredScopes(payload.scope, OAUTH_REQUIRED_SCOPES)) {
-      unauthorized(res, "Insufficient scope");
-      return false;
-    }
-  } catch {
-    unauthorized(res, "Invalid or expired OAuth token");
-    return false;
-  }
-
-  return true;
-}
 
 const sessions = new Map();
 
@@ -580,21 +642,26 @@ function getHeaderSessionId(req) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function createSessionContext() {
+function createSessionContext(workspaceInfo) {
   let initializedSessionId = "";
-  const server = createMcpServer();
+  const workspaceContext = {
+    workspaceRoot: workspaceInfo.workspaceRoot,
+    resolveSafePath: createPathResolver(workspaceInfo.workspaceRoot, workspaceInfo.workspaceRootReal)
+  };
+  const server = createMcpServer(workspaceContext);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
     enableJsonResponse: true,
     onsessioninitialized: (sessionId) => {
       initializedSessionId = sessionId;
-      sessions.set(sessionId, { server, transport });
+      sessions.set(sessionId, { server, transport, ownerKey: workspaceInfo.ownerKey, workspaceName: workspaceInfo.workspaceName });
     }
   });
 
   return {
     server,
     transport,
+    ownerKey: workspaceInfo.ownerKey,
     getInitializedSessionId: () => initializedSessionId
   };
 }
@@ -608,7 +675,8 @@ async function closeContext(context) {
 }
 
 async function handleMcpRequest(req, res, requestBody) {
-  if (!(await requireAuth(req, res))) return;
+  const workspaceInfo = await getWorkspaceForRequest(req, res);
+  if (!workspaceInfo) return;
 
   const headerSessionId = getHeaderSessionId(req);
   const hasHeaderSession = Boolean(headerSessionId);
@@ -622,9 +690,14 @@ async function handleMcpRequest(req, res, requestBody) {
     return;
   }
 
+  if (context && context.ownerKey !== workspaceInfo.ownerKey) {
+    unauthorized(res, "Session does not belong to authenticated user");
+    return;
+  }
+
   let isNewContext = false;
   if (!context) {
-    context = createSessionContext();
+    context = createSessionContext(workspaceInfo);
     isNewContext = true;
     await context.server.connect(context.transport);
   }
@@ -658,7 +731,8 @@ app.get("/mcp", async (req, res) => {
 });
 
 app.delete("/mcp", async (req, res) => {
-  if (!(await requireAuth(req, res))) return;
+  const workspaceInfo = await getWorkspaceForRequest(req, res);
+  if (!workspaceInfo) return;
 
   const sessionId = getHeaderSessionId(req);
   const context = sessionId ? sessions.get(sessionId) : null;
@@ -668,6 +742,11 @@ app.delete("/mcp", async (req, res) => {
       error: "Session not found",
       message: "No active session matches mcp-session-id"
     });
+    return;
+  }
+
+  if (context.ownerKey !== workspaceInfo.ownerKey) {
+    unauthorized(res, "Session does not belong to authenticated user");
     return;
   }
 
@@ -681,10 +760,6 @@ app.delete("/mcp", async (req, res) => {
 });
 
 app.get("/.well-known/oauth-protected-resource", (_req, res) => {
-  if (AUTH_MODE !== "oauth") {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
   res.json({
     resource: MCP_PUBLIC_URL,
     authorization_servers: [OAUTH_ISSUER],
@@ -700,9 +775,8 @@ try {
   process.exit(1);
 }
 
-app.listen(PORT, HOST, () => {
-  console.log(`docs-mcp listening on http://${HOST}:${PORT}`);
+app.listen(PORT, HOST, async () => {
+  await fs.mkdir(WORKSPACES_ROOT, { recursive: true });
+  console.log(`mcp-oauth listening on http://${HOST}:${PORT}`);
   console.log(`MCP endpoint available at http://${HOST}:${PORT}/mcp`);
 });
-
-
